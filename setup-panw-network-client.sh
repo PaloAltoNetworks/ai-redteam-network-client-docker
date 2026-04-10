@@ -910,21 +910,16 @@ do_install() {
   step "4" "Pulling container image"
 
   # Skip if already running the same image
-  if [ "$IMAGE_DIGEST" != "unknown" ]; then
-    local COMPOSE
-    COMPOSE=$(detect_compose)
-    local RUNNING_CID
-    RUNNING_CID=$($COMPOSE ps -q panw-network-client 2>/dev/null | head -1)
-    if [ -n "$RUNNING_CID" ]; then
-      local RUNNING_IMAGE
-      RUNNING_IMAGE=$(docker inspect --format='{{.Config.Image}}' "$RUNNING_CID" 2>/dev/null || echo "")
-      if [ -n "$RUNNING_IMAGE" ]; then
-        local LOCAL_DIGEST
-        LOCAL_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$RUNNING_IMAGE" 2>/dev/null || echo "")
-        if echo "$LOCAL_DIGEST" | grep -q "$IMAGE_DIGEST"; then
-          info "Already running latest image ($IMAGE_DIGEST). Nothing to do."
-          exit 0
-        fi
+  local DIGEST_FILE="$SCRIPT_DIR/.image-digest"
+  if [ "$IMAGE_DIGEST" != "unknown" ] && [ -f "$DIGEST_FILE" ]; then
+    local PREV_DIGEST
+    PREV_DIGEST=$(cat "$DIGEST_FILE" 2>/dev/null || echo "")
+    if [ "$PREV_DIGEST" = "$IMAGE_DIGEST" ]; then
+      local COMPOSE_CHECK
+      COMPOSE_CHECK=$(detect_compose)
+      if $COMPOSE_CHECK ps --format json 2>/dev/null | grep -q '"running"'; then
+        info "Already running latest image ($IMAGE_DIGEST). Nothing to do."
+        exit 0
       fi
     fi
   fi
@@ -1039,6 +1034,10 @@ EOF
   fi
 
   log_deploy "install" "image=$FULL_IMAGE digest=$IMAGE_DIGEST chart=$CHART_VERSION"
+
+  # Save digest for up-to-date check on next run
+  printf '%s' "$IMAGE_DIGEST" > "$SCRIPT_DIR/.image-digest"
+  chmod 600 "$SCRIPT_DIR/.image-digest"
 
   # --- Step 8: Verify ---
   step "8" "Verifying startup"
