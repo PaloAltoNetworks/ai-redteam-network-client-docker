@@ -2,7 +2,7 @@
 
 Deploy the Palo Alto Networks AI Red Teaming network client using **Docker Compose** on a standard server (Linux or macOS) — no Kubernetes or Helm required.
 
-![Demo](demo.gif)
+<a href="https://asciinema.org/a/RGulGV9gq1Lm7d7E?autoplay=1"><img src="https://asciinema.org/a/RGulGV9gq1Lm7d7E.svg" alt="Demo - Docker Setup" width="100%" /></a>
 
 ## Quick Start
 
