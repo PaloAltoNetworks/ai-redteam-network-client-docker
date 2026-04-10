@@ -70,6 +70,7 @@ log_deploy() {
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   printf "[%s] user=%s action=%s %s\n" "$ts" "$(whoami)" "$1" "${2:-}" >> "$DEPLOY_LOG"
+  chmod 600 "$DEPLOY_LOG" 2>/dev/null || true
 }
 
 # --- Usage ---
