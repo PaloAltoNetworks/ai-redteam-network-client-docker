@@ -692,11 +692,13 @@ install_crane() {
 # =============================================================================
 
 do_install() {
-  echo ""
-  printf "${BOLD}=============================================${NC}\n"
-  printf "${BOLD} Palo Alto Network Client - Docker Installer${NC}\n"
-  printf "${BOLD}=============================================${NC}\n"
-  echo ""
+  if [ "$QUIET" != true ]; then
+    echo ""
+    printf "${BOLD}=============================================${NC}\n"
+    printf "${BOLD} Palo Alto Network Client - Docker Installer${NC}\n"
+    printf "${BOLD}=============================================${NC}\n"
+    echo ""
+  fi
 
   # --- Load .env first (proxy settings needed for preflight + crane) ---
   if [ ! -f "$ENV_FILE" ]; then
@@ -762,7 +764,11 @@ do_install() {
 
   # --- Step 2: Registry login ---
   step "2" "Logging into registry"
-  printf '%s\n' "${REGISTRY_PASSWORD}" | crane auth login "$REGISTRY" -u "${REGISTRY_USERNAME}" --password-stdin
+  if [ "$QUIET" = true ]; then
+    printf '%s\n' "${REGISTRY_PASSWORD}" | crane auth login "$REGISTRY" -u "${REGISTRY_USERNAME}" --password-stdin >/dev/null 2>&1
+  else
+    printf '%s\n' "${REGISTRY_PASSWORD}" | crane auth login "$REGISTRY" -u "${REGISTRY_USERNAME}" --password-stdin
+  fi
   success "Registry login successful."
 
   # --- Resolve chart version ---
@@ -792,7 +798,11 @@ do_install() {
   WORK_DIR=$(mktemp -d)
   trap 'rm -rf "${WORK_DIR:-}"' EXIT
 
-  crane pull "${CHART_REF}:${CHART_VERSION}" "$WORK_DIR/chart.tar"
+  if [ "$QUIET" = true ]; then
+    crane pull "${CHART_REF}:${CHART_VERSION}" "$WORK_DIR/chart.tar" >/dev/null 2>&1
+  else
+    crane pull "${CHART_REF}:${CHART_VERSION}" "$WORK_DIR/chart.tar"
+  fi
   mkdir -p "$WORK_DIR/chart-extract"
   tar -xf "$WORK_DIR/chart.tar" --no-same-owner -C "$WORK_DIR/chart-extract"
 
@@ -900,8 +910,13 @@ do_install() {
   step "4" "Pulling container image"
 
   local IMAGE_TAR="$WORK_DIR/panw-client.tar"
-  crane pull "$FULL_IMAGE" "$IMAGE_TAR"
-  docker load -i "$IMAGE_TAR"
+  if [ "$QUIET" = true ]; then
+    crane pull "$FULL_IMAGE" "$IMAGE_TAR" >/dev/null 2>&1
+    docker load -i "$IMAGE_TAR" >/dev/null 2>&1
+  else
+    crane pull "$FULL_IMAGE" "$IMAGE_TAR"
+    docker load -i "$IMAGE_TAR"
+  fi
   success "Image loaded into Docker."
 
   # --- Step 5: Write config files (with backup) ---
