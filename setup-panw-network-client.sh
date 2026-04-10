@@ -440,8 +440,9 @@ do_diagnose() {
   # Pattern: TLS/SSL errors
   if echo "$logs" | grep -qi "certificate\|tls\|ssl\|x509"; then
     error "TLS/CERTIFICATE ERROR detected"
-    info "  -> Check if a corporate proxy is intercepting HTTPS traffic"
-    info "  -> Verify DISABLE_SSL_VERIFICATION setting in .env.runtime"
+    info "  -> For self-signed or internal CA certs: set DISABLE_SSL_VERIFICATION=\"true\" in .env"
+    info "  -> Then re-run: ./setup-panw-network-client.sh"
+    info "  -> If behind a proxy: set HTTP_PROXY, HTTPS_PROXY, NO_PROXY in .env (v1.0.5+)"
     info "  -> Ensure the host's CA certificates are up to date"
     issues_found=true
     echo ""
@@ -691,11 +692,7 @@ do_install() {
   printf "${BOLD}=============================================${NC}\n"
   echo ""
 
-  # --- Preflight ---
-  step "0" "Preflight checks"
-  preflight "install"
-
-  # --- Load .env ---
+  # --- Load .env first (proxy settings needed for preflight + crane) ---
   if [ ! -f "$ENV_FILE" ]; then
     error ".env file not found at $ENV_FILE"
     echo ""
@@ -705,6 +702,14 @@ do_install() {
   fi
 
   load_env "$ENV_FILE"
+
+  if [ -n "${HTTP_PROXY:-}${HTTPS_PROXY:-}" ]; then
+    info "Proxy configured: HTTP_PROXY=${HTTP_PROXY:-} HTTPS_PROXY=${HTTPS_PROXY:-}"
+  fi
+
+  # --- Preflight ---
+  step "0" "Preflight checks"
+  preflight "install"
 
   # Validate required variables
   local MISSING=0
@@ -867,10 +872,10 @@ do_install() {
 
   if [ "${DISABLE_SSL_VERIFICATION}" = "true" ]; then
     echo ""
-    warn "!!! DISABLE_SSL_VERIFICATION is set to 'true' !!!"
-    warn "!!! This disables TLS certificate validation and exposes"
-    warn "!!! all traffic to man-in-the-middle attacks."
-    warn "!!! This should NEVER be used in production."
+    warn "DISABLE_SSL_VERIFICATION is enabled (Custom SSL mode)."
+    warn "This is intended for on-premises or private cloud deployments"
+    warn "with self-signed or internal CA certificates."
+    warn "Not required for production environments with valid SSL certificates."
     echo ""
   fi
 
@@ -918,6 +923,10 @@ do_install() {
     printf 'POOL_SIZE="%s"\n' "${POOL_SIZE//\"/\\\"}"
     printf 'RE_AUTH_INTERVAL="%s"\n' "${RE_AUTH_INTERVAL//\"/\\\"}"
     printf 'DISABLE_SSL_VERIFICATION="%s"\n' "${DISABLE_SSL_VERIFICATION//\"/\\\"}"
+    # Proxy settings (v1.0.5+)
+    [ -n "${HTTP_PROXY:-}" ]  && printf 'HTTP_PROXY="%s"\n' "${HTTP_PROXY//\"/\\\"}"
+    [ -n "${HTTPS_PROXY:-}" ] && printf 'HTTPS_PROXY="%s"\n' "${HTTPS_PROXY//\"/\\\"}"
+    [ -n "${NO_PROXY:-}" ]    && printf 'NO_PROXY="%s"\n' "${NO_PROXY//\"/\\\"}"
   } > "${SCRIPT_DIR}/.env.runtime"
   chmod 600 "${SCRIPT_DIR}/.env.runtime"
 
