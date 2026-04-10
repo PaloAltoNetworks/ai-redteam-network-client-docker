@@ -909,6 +909,19 @@ do_install() {
   # --- Step 4: Pull image (to temp dir, not SCRIPT_DIR) ---
   step "4" "Pulling container image"
 
+  # Skip if already running the same image
+  local RUNNING_DIGEST
+  RUNNING_DIGEST=$(docker inspect --format='{{.Image}}' "$(docker ps -qf name=panw-network-client 2>/dev/null | head -1)" 2>/dev/null || echo "")
+  if [ -n "$RUNNING_DIGEST" ] && [ "$IMAGE_DIGEST" != "unknown" ]; then
+    # Docker stores digests as sha256:..., crane returns sha256:...
+    local RUNNING_REPO_DIGEST
+    RUNNING_REPO_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$(docker images -q "$FULL_IMAGE" 2>/dev/null | head -1)" 2>/dev/null || echo "")
+    if echo "$RUNNING_REPO_DIGEST" | grep -q "$IMAGE_DIGEST"; then
+      info "Already running latest image ($IMAGE_DIGEST). Nothing to do."
+      exit 0
+    fi
+  fi
+
   local IMAGE_TAR="$WORK_DIR/panw-client.tar"
   if [ "$QUIET" = true ]; then
     crane pull "$FULL_IMAGE" "$IMAGE_TAR" >/dev/null 2>&1
