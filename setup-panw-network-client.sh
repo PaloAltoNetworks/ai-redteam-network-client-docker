@@ -648,9 +648,10 @@ install_crane() {
     warn "Checksum mismatch for crane binary."
     warn "  Expected: $expected_sha"
     warn "  Got:      $actual_sha"
-    warn "This may be due to placeholder checksums in the script."
+    warn "The downloaded binary may be corrupted or tampered with."
     warn "Verify manually: https://github.com/google/go-containerregistry/releases/tag/v${CRANE_VERSION}"
-    info "Proceeding with installation..."
+    rm -f "$CRANE_TMP"
+    die "Aborting installation due to checksum mismatch."
   fi
 
   # Try user-local install first (no sudo needed)
