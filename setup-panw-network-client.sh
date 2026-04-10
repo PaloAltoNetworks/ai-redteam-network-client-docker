@@ -1113,5 +1113,5 @@ case "$MODE" in
   status)   do_status ;;
   validate) do_validate ;;
   diagnose) do_diagnose ;;
-  install)  do_install ;;
+  install)  if [ "$QUIET" = true ]; then do_install >/dev/null; else do_install; fi ;;
 esac
