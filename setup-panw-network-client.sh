@@ -778,9 +778,8 @@ do_install() {
   # --- Step 3: Extract chart ---
   step "3" "Extracting chart to discover image and config"
 
-  local WORK_DIR
   WORK_DIR=$(mktemp -d)
-  trap 'rm -rf "$WORK_DIR"' EXIT
+  trap 'rm -rf "${WORK_DIR:-}"' EXIT
 
   crane pull "${CHART_REF}:${CHART_VERSION}" "$WORK_DIR/chart.tar"
   mkdir -p "$WORK_DIR/chart-extract"
