@@ -57,12 +57,12 @@ fi
 
 # --- Output helpers ---
 
-info()    { printf "${BLUE}[INFO]${NC} %s\n" "$1"; }
-success() { printf "${GREEN}[OK]${NC}   %s\n" "$1"; }
+info()    { [ "$QUIET" = true ] || printf "${BLUE}[INFO]${NC} %s\n" "$1"; }
+success() { [ "$QUIET" = true ] || printf "${GREEN}[OK]${NC}   %s\n" "$1"; }
 warn()    { printf "${YELLOW}[WARN]${NC} %s\n" "$1" >&2; }
 error()   { printf "${RED}[ERR]${NC}  %s\n" "$1" >&2; }
 die()     { error "$1"; exit 1; }
-step()    { printf "\n${BOLD}--- Step %s: %s ---${NC}\n" "$1" "$2"; }
+step()    { [ "$QUIET" = true ] || printf "\n${BOLD}--- Step %s: %s ---${NC}\n" "$1" "$2"; }
 
 # --- Deployment audit log ---
 
@@ -86,6 +86,7 @@ Options:
   --status          Check current deployment state
   --validate        Verify the channel is connected after setup
   --diagnose        Analyze container logs for common issues
+  --quiet, -q       Suppress info/success output (errors and warnings only)
   --help            Show this help message
 
 Quick Start:
@@ -103,6 +104,7 @@ USAGE
 
 MODE="install"
 DRY_RUN=false
+QUIET=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -111,6 +113,7 @@ while [ $# -gt 0 ]; do
     --status)    MODE="status"; shift ;;
     --validate)  MODE="validate"; shift ;;
     --diagnose)  MODE="diagnose"; shift ;;
+    --quiet|-q)  QUIET=true; shift ;;
     --help|-h)   usage ;;
     *)           error "Unknown option: $1"; exit 1 ;;
   esac
@@ -994,7 +997,11 @@ EOF
   fi
 
   cd "$SCRIPT_DIR"
-  $COMPOSE up -d
+  if [ "$QUIET" = true ]; then
+    $COMPOSE up -d --quiet-pull 2>/dev/null
+  else
+    $COMPOSE up -d
+  fi
 
   log_deploy "install" "image=$FULL_IMAGE digest=$IMAGE_DIGEST chart=$CHART_VERSION"
 
@@ -1039,33 +1046,37 @@ EOF
       warn "Could not confirm connection within 30s. Check logs or run --validate later."
     fi
 
-    echo ""
-    info "Recent logs:"
-    $COMPOSE logs --tail=15 panw-network-client 2>/dev/null | sed 's/^/  /'
+    if [ "$QUIET" != true ]; then
+      echo ""
+      info "Recent logs:"
+      $COMPOSE logs --tail=15 panw-network-client 2>/dev/null | sed 's/^/  /'
+    fi
   fi
 
   # --- Done ---
-  echo ""
-  printf "${BOLD}=============================================${NC}\n"
-  printf "${GREEN}${BOLD} Setup complete!${NC}\n"
-  printf "${BOLD}=============================================${NC}\n"
-  echo ""
-  info "Files in: $SCRIPT_DIR"
-  echo ""
-  echo "  Config files:"
-  echo "    .env.setup   - Registry credentials (script use only)"
-  echo "    .env.runtime - Container runtime config"
-  echo "    docker-compose.yml"
-  echo ""
-  echo "  Commands:"
-  echo "    Validate:    ./setup-panw-network-client.sh --validate"
-  echo "    Diagnose:    ./setup-panw-network-client.sh --diagnose"
-  echo "    Status:      ./setup-panw-network-client.sh --status"
-  echo "    Follow logs: $COMPOSE logs -f panw-network-client"
-  echo "    Stop:        $COMPOSE down"
-  echo "    Restart:     $COMPOSE up -d"
-  echo "    Update:      change CHART_VERSION in .env and rerun this script"
-  echo ""
+  if [ "$QUIET" != true ]; then
+    echo ""
+    printf "${BOLD}=============================================${NC}\n"
+    printf "${GREEN}${BOLD} Setup complete!${NC}\n"
+    printf "${BOLD}=============================================${NC}\n"
+    echo ""
+    info "Files in: $SCRIPT_DIR"
+    echo ""
+    echo "  Config files:"
+    echo "    .env.setup   - Registry credentials (script use only)"
+    echo "    .env.runtime - Container runtime config"
+    echo "    docker-compose.yml"
+    echo ""
+    echo "  Commands:"
+    echo "    Validate:    ./setup-panw-network-client.sh --validate"
+    echo "    Diagnose:    ./setup-panw-network-client.sh --diagnose"
+    echo "    Status:      ./setup-panw-network-client.sh --status"
+    echo "    Follow logs: $COMPOSE logs -f panw-network-client"
+    echo "    Stop:        $COMPOSE down"
+    echo "    Restart:     $COMPOSE up -d"
+    echo "    Update:      change CHART_VERSION in .env and rerun this script"
+    echo ""
+  fi
 }
 
 # =============================================================================
