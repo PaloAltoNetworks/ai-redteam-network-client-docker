@@ -624,7 +624,7 @@ install_crane() {
     return
   fi
 
-  curl -fsSL "$CRANE_URL" -o "$CRANE_TMP"
+  curl -fsSL --proto =https "$CRANE_URL" -o "$CRANE_TMP"
 
   # Checksum verification
   local expected_sha
