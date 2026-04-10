@@ -974,7 +974,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "pgrep", "-x", "client"]
+      test: ["CMD-SHELL", "kill -0 1"]
       interval: 30s
       timeout: 5s
       retries: 3
