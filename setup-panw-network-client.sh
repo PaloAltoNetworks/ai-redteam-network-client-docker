@@ -1037,6 +1037,7 @@ EOF
   if [ $attempts -ge $max_attempts ]; then
     warn "Container may not have started. Check logs:"
     $COMPOSE logs --tail=20 panw-network-client
+    exit 1
   else
     success "Container is running."
     echo ""
