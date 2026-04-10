@@ -641,8 +641,8 @@ install_crane() {
   elif command -v shasum &>/dev/null; then
     actual_sha=$(shasum -a 256 "$CRANE_TMP" | awk '{print $1}')
   else
-    warn "Cannot verify checksum (sha256sum/shasum not found). Proceeding with caution."
-    actual_sha="$expected_sha"
+    rm -f "$CRANE_TMP"
+    die "Cannot verify checksum: neither sha256sum nor shasum found. Install coreutils and retry."
   fi
 
   if [ "$actual_sha" != "$expected_sha" ]; then
