@@ -1062,8 +1062,9 @@ EOF
 # =============================================================================
 
 if [[ "${-}" == *x* ]] || [ -n "${BASH_XTRACEFD:-}" ]; then
-  warn "Shell tracing (set -x) is active. Secrets may be exposed in output."
-  warn "Disable tracing before running this script with credentials."
+  warn "Shell tracing (set -x) detected. Disabling to protect credentials."
+  set +x
+  unset BASH_XTRACEFD
 fi
 
 # =============================================================================
