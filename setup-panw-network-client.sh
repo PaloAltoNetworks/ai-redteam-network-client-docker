@@ -61,6 +61,7 @@ info()    { printf "${BLUE}[INFO]${NC} %s\n" "$1"; }
 success() { printf "${GREEN}[OK]${NC}   %s\n" "$1"; }
 warn()    { printf "${YELLOW}[WARN]${NC} %s\n" "$1" >&2; }
 error()   { printf "${RED}[ERR]${NC}  %s\n" "$1" >&2; }
+die()     { error "$1"; exit 1; }
 step()    { printf "\n${BOLD}--- Step %s: %s ---${NC}\n" "$1" "$2"; }
 
 # --- Deployment audit log ---
