@@ -897,6 +897,7 @@ do_install() {
   for f in .env.setup .env.runtime docker-compose.yml; do
     if [ -f "$SCRIPT_DIR/$f" ]; then
       cp "$SCRIPT_DIR/$f" "$SCRIPT_DIR/${f}.bak"
+      chmod 600 "$SCRIPT_DIR/${f}.bak"
       info "Backed up existing $f -> ${f}.bak"
     fi
   done
