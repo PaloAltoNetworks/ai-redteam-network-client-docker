@@ -5,47 +5,124 @@ set -euo pipefail
 # Palo Alto AI Red Teaming Network Client - Docker Setup (No Kubernetes/Helm)
 # =============================================================================
 #
-# Full documentation: palo-alto-network-client-docker-setup.md
+# Usage:
+#   ./setup-panw-network-client.sh [OPTIONS]
+#
+# Options:
+#   --init            Interactive guided setup (creates .env from portal values)
+#   --dry-run         Show what would happen without making changes
+#   --status          Check current deployment state
+#   --validate        Verify the channel is connected after setup
+#   --diagnose        Analyze container logs for common issues
+#   --help            Show this help message
 #
 # Quick Start:
-#   1. Create a .env file with your credentials (see documentation)
-#   2. chmod +x setup-panw-network-client.sh
-#   3. ./setup-panw-network-client.sh
+#   1. ./setup-panw-network-client.sh --init
+#   2. ./setup-panw-network-client.sh
 #
-# Required .env variables:
-#   REGISTRY_USERNAME, REGISTRY_PASSWORD, CLIENT_ID, CLIENT_SECRET,
-#   CHANNEL_ID, TENANT_PATH
-#
-# Optional:
-#   CHART_VERSION (default: latest)
+# Or manually:
+#   1. cp .env.example .env && edit .env
+#   2. ./setup-panw-network-client.sh
 #
 # Prerequisites:
-#   - Docker and Docker Compose installed
-#   - curl, tar, sudo access (for crane installation)
+#   - Docker (20.10+) with Docker Compose
+#   - curl, tar
 #   - Outbound HTTPS to *.paloaltonetworks.com and github.com
 # =============================================================================
+
+# --- Constants ---
 
 REGISTRY="registry.ai-red-teaming.paloaltonetworks.com"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
+DEPLOY_LOG="${SCRIPT_DIR}/deploy.log"
+CRANE_VERSION="0.20.2"
+CRANE_SHA256_DARWIN_ARM64="b47a8291d1069656bcfb8346dc9494f03e734d7a4058961fa53f0dfc9cb41abb"
+CRANE_SHA256_DARWIN_X86_64="ae2677fc68b05ee3a63fe7b1d599aa4a554610b9f9da499a0c39669f446d29ed"
+CRANE_SHA256_LINUX_X86_64="c14340087103ba9dadf61d45acd20675490fd0ccbd56ac7901fc1b502137f44b"
+CRANE_SHA256_LINUX_ARM64="aff0db48825124c9331ea310057214bd4e92c01aa2e414d539e9659841d9422a"
 
-echo "============================================="
-echo " Palo Alto Network Client - Docker Installer"
-echo "============================================="
-echo ""
+# --- Color output (respects NO_COLOR) ---
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  RED='\033[0;31m'
+  GREEN='\033[0;32m'
+  YELLOW='\033[1;33m'
+  BLUE='\033[0;34m'
+  BOLD='\033[1m'
+  NC='\033[0m'
+else
+  RED='' GREEN='' YELLOW='' BLUE='' BOLD='' NC=''
+fi
+
+# --- Output helpers ---
+
+info()    { printf "${BLUE}[INFO]${NC} %s\n" "$1"; }
+success() { printf "${GREEN}[OK]${NC}   %s\n" "$1"; }
+warn()    { printf "${YELLOW}[WARN]${NC} %s\n" "$1" >&2; }
+error()   { printf "${RED}[ERR]${NC}  %s\n" "$1" >&2; }
+step()    { printf "\n${BOLD}--- Step %s: %s ---${NC}\n" "$1" "$2"; }
+
+# --- Deployment audit log ---
+
+log_deploy() {
+  local ts
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  printf "[%s] user=%s action=%s %s\n" "$ts" "$(whoami)" "$1" "${2:-}" >> "$DEPLOY_LOG"
+}
+
+# --- Usage ---
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./setup-panw-network-client.sh [OPTIONS]
+
+Options:
+  --init            Interactive guided setup (creates .env from portal values)
+  --dry-run         Show what would happen without making changes
+  --status          Check current deployment state
+  --validate        Verify the channel is connected after setup
+  --diagnose        Analyze container logs for common issues
+  --help            Show this help message
+
+Quick Start:
+  1. ./setup-panw-network-client.sh --init
+  2. ./setup-panw-network-client.sh
+
+Or manually:
+  1. cp .env.example .env && edit .env
+  2. ./setup-panw-network-client.sh
+USAGE
+  exit 0
+}
+
+# --- Parse CLI arguments ---
+
+MODE="install"
+DRY_RUN=false
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --init)      MODE="init"; shift ;;
+    --dry-run)   DRY_RUN=true; shift ;;
+    --status)    MODE="status"; shift ;;
+    --validate)  MODE="validate"; shift ;;
+    --diagnose)  MODE="diagnose"; shift ;;
+    --help|-h)   usage ;;
+    *)           error "Unknown option: $1"; usage ;;
+  esac
+done
 
 # --- Safe .env parser (no arbitrary code execution) ---
 
 load_env() {
   local file="$1"
   while IFS= read -r line || [ -n "$line" ]; do
-    # Skip blank lines and comments
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-    # Extract key=value (strip leading whitespace, handle quoted values)
     if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
       local key="${BASH_REMATCH[1]}"
       local value="${BASH_REMATCH[2]}"
-      # Strip surrounding quotes (single or double)
       if [[ "$value" =~ ^\"(.*)\"$ ]]; then
         value="${BASH_REMATCH[1]}"
       elif [[ "$value" =~ ^\'(.*)\'$ ]]; then
@@ -56,274 +133,801 @@ load_env() {
   done < "$file"
 }
 
-# --- Load .env file ---
+# --- Detect docker compose command ---
 
-if [ ! -f "$ENV_FILE" ]; then
-  echo "ERROR: .env file not found at $ENV_FILE"
-  echo ""
-  echo "Create a .env file with the following content:"
-  echo ""
-  echo '  REGISTRY_USERNAME="<docker registry username from portal step 2>"'
-  echo '  REGISTRY_PASSWORD="<docker registry password from portal step 2>"'
-  echo '  CLIENT_ID="<service account client ID from portal step 3>"'
-  echo '  CLIENT_SECRET="<service account client secret from portal step 3>"'
-  echo '  CHANNEL_ID="<channel ID from portal step 4>"'
-  echo '  TENANT_PATH="<e.g. pairs-redteam-prd-fckx/red-teaming-onprem>"'
-  echo '  CHART_VERSION="latest"'
-  echo ""
-  exit 1
-fi
-
-load_env "$ENV_FILE"
-
-# --- Validate required variables ---
-
-MISSING=0
-for VAR in REGISTRY_USERNAME REGISTRY_PASSWORD CLIENT_ID CLIENT_SECRET CHANNEL_ID TENANT_PATH; do
-  if [ -z "${!VAR:-}" ]; then
-    echo "ERROR: $VAR is not set in .env"
-    MISSING=1
+detect_compose() {
+  if docker compose version &>/dev/null; then
+    echo "docker compose"
+  elif command -v docker-compose &>/dev/null; then
+    echo "docker-compose"
+  else
+    echo ""
   fi
-done
-[ "$MISSING" -eq 1 ] && exit 1
+}
 
-# Default chart version to latest if not set
-CHART_VERSION="${CHART_VERSION:-latest}"
+# --- Extract TENANT_PATH from OCI URL ---
 
-# Validate TENANT_PATH format
-TENANT_PATH="${TENANT_PATH#/}"
-TENANT_PATH="${TENANT_PATH%/}"
-if [[ ! "$TENANT_PATH" =~ ^[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)*$ ]]; then
-  echo "ERROR: TENANT_PATH contains invalid characters: $TENANT_PATH"
-  echo "  Expected format: org-id/product (e.g., pairs-redteam-prd-fckx/red-teaming-onprem)"
-  exit 1
-fi
+parse_tenant_path() {
+  local url="$1"
+  # Strip oci:// prefix, registry host, and /charts/panw-network-client suffix
+  url="${url#oci://}"
+  url="${url#https://}"
+  url="${url#${REGISTRY}/}"
+  url="${url%/charts/panw-network-client*}"
+  echo "$url"
+}
 
-echo "Registry:      $REGISTRY"
-echo "Tenant path:   $TENANT_PATH"
-echo "Chart version: $CHART_VERSION"
-echo ""
+# =============================================================================
+# MODE: --init (Interactive guided setup)
+# =============================================================================
 
-# --- Step 1: Install crane ---
+do_init() {
+  echo ""
+  printf "${BOLD}=============================================${NC}\n"
+  printf "${BOLD} Palo Alto Network Client - Interactive Setup${NC}\n"
+  printf "${BOLD}=============================================${NC}\n"
+  echo ""
+  info "This will guide you through creating your .env file."
+  info "Have the AI Red Teaming portal open to Channel Setup."
+  echo ""
 
-echo "--- Step 1: Installing crane ---"
+  if [ -f "$ENV_FILE" ]; then
+    warn ".env file already exists at $ENV_FILE"
+    printf "  Overwrite? [y/N] "
+    read -r confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+      info "Keeping existing .env file."
+      exit 0
+    fi
+  fi
 
-if command -v crane &>/dev/null; then
-  echo "crane already installed, skipping."
-else
+  # Step 2: Registry credentials
+  printf "\n${BOLD}Portal Step 2: Docker Registry Credentials${NC}\n"
+  info "Find the username and password in the 'kubectl create secret' command."
+  echo ""
+  printf "  Registry Username: "
+  read -r REG_USER
+  printf "  Registry Password: "
+  read -rs REG_PASS
+  echo ""
+
+  # Validate registry credentials immediately
+  info "Validating registry credentials..."
+  if command -v crane &>/dev/null; then
+    if printf '%s\n' "$REG_PASS" | crane auth login "$REGISTRY" -u "$REG_USER" --password-stdin 2>/dev/null; then
+      success "Registry credentials valid."
+    else
+      warn "Could not validate credentials (may still work). Continuing..."
+    fi
+  else
+    info "Skipping validation (crane not yet installed). Will verify during setup."
+  fi
+
+  # Step 3: Service account
+  printf "\n${BOLD}Portal Step 3: Service Account${NC}\n"
+  info "Create a service account in the portal and copy the Client ID and Secret."
+  echo ""
+  printf "  Client ID: "
+  read -r SA_CLIENT_ID
+  printf "  Client Secret: "
+  read -rs SA_CLIENT_SECRET
+  echo ""
+
+  # Step 4: Channel ID and tenant path
+  printf "\n${BOLD}Portal Step 4: Channel Configuration${NC}\n"
+  echo ""
+  printf "  Channel ID: "
+  read -r CH_ID
+
+  echo ""
+  info "The Tenant Path can be extracted from the helm install command in Step 4."
+  info "You can paste the FULL OCI URL or just the tenant path."
+  info "Example OCI URL: oci://registry.ai-red-teaming.paloaltonetworks.com/pairs-redteam-prd-fckx/red-teaming-onprem/charts/panw-network-client"
+  info "Example tenant path: pairs-redteam-prd-fckx/red-teaming-onprem"
+  echo ""
+  printf "  OCI URL or Tenant Path: "
+  read -r TENANT_INPUT
+
+  # Auto-detect and parse tenant path from full URL
+  if [[ "$TENANT_INPUT" == *"$REGISTRY"* ]] || [[ "$TENANT_INPUT" == oci://* ]]; then
+    TENANT=$(parse_tenant_path "$TENANT_INPUT")
+    info "Auto-extracted tenant path: $TENANT"
+  else
+    TENANT="$TENANT_INPUT"
+  fi
+
+  # Chart version
+  echo ""
+  printf "  Chart version [latest]: "
+  read -r CHART_VER
+  CHART_VER="${CHART_VER:-latest}"
+
+  # Write .env
+  {
+    printf '# Generated by setup-panw-network-client.sh --init\n'
+    printf '# Date: %s\n\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    printf 'REGISTRY_USERNAME="%s"\n' "$REG_USER"
+    printf 'REGISTRY_PASSWORD="%s"\n' "$REG_PASS"
+    printf 'CLIENT_ID="%s"\n' "$SA_CLIENT_ID"
+    printf 'CLIENT_SECRET="%s"\n' "$SA_CLIENT_SECRET"
+    printf 'CHANNEL_ID="%s"\n' "$CH_ID"
+    printf 'TENANT_PATH="%s"\n' "$TENANT"
+    printf 'CHART_VERSION="%s"\n' "$CHART_VER"
+  } > "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+
+  echo ""
+  success ".env file created at $ENV_FILE (mode 600)"
+  echo ""
+  info "Next: run ./setup-panw-network-client.sh to deploy."
+  log_deploy "init" "env_file_created"
+}
+
+# =============================================================================
+# MODE: --status (Check current deployment state)
+# =============================================================================
+
+do_status() {
+  printf "${BOLD}=============================================${NC}\n"
+  printf "${BOLD} Deployment Status${NC}\n"
+  printf "${BOLD}=============================================${NC}\n"
+  echo ""
+
+  # Check files
+  local files_ok=true
+  for f in .env.runtime docker-compose.yml; do
+    if [ -f "$SCRIPT_DIR/$f" ]; then
+      success "$f exists"
+    else
+      warn "$f not found"
+      files_ok=false
+    fi
+  done
+
+  # Check compose
+  local COMPOSE
+  COMPOSE=$(detect_compose)
+  if [ -z "$COMPOSE" ]; then
+    error "Docker Compose not found"
+    return 1
+  fi
+
+  # Check container
+  echo ""
+  cd "$SCRIPT_DIR"
+  if $COMPOSE ps --format json 2>/dev/null | grep -q "panw-network-client"; then
+    local state
+    state=$($COMPOSE ps --format json 2>/dev/null | grep "panw-network-client" || true)
+    success "Container is running"
+    echo "$state" | head -3
+  elif $COMPOSE ps 2>/dev/null | grep -q "panw-network-client"; then
+    success "Container found"
+    $COMPOSE ps 2>/dev/null | grep "panw-network-client"
+  else
+    warn "Container not running"
+  fi
+
+  # Check image version
+  echo ""
+  if [ -f "$SCRIPT_DIR/docker-compose.yml" ]; then
+    local img
+    img=$(grep "image:" "$SCRIPT_DIR/docker-compose.yml" | head -1 | awk '{print $2}' | tr -d '"')
+    info "Deployed image: $img"
+  fi
+
+  # Check deploy log
+  if [ -f "$DEPLOY_LOG" ]; then
+    echo ""
+    info "Last 5 deploy events:"
+    tail -5 "$DEPLOY_LOG" | sed 's/^/  /'
+  fi
+}
+
+# =============================================================================
+# MODE: --validate (Verify channel connectivity)
+# =============================================================================
+
+do_validate() {
+  printf "${BOLD}=============================================${NC}\n"
+  printf "${BOLD} Channel Validation${NC}\n"
+  printf "${BOLD}=============================================${NC}\n"
+  echo ""
+
+  local COMPOSE
+  COMPOSE=$(detect_compose)
+  if [ -z "$COMPOSE" ]; then
+    error "Docker Compose not found"
+    return 1
+  fi
+
+  cd "$SCRIPT_DIR"
+
+  # Check container is running
+  if ! $COMPOSE ps 2>/dev/null | grep -q "panw-network-client"; then
+    error "Container is not running. Start it first: $COMPOSE up -d"
+    return 1
+  fi
+
+  info "Checking recent logs for connection status..."
+  echo ""
+
+  local logs
+  logs=$($COMPOSE logs --tail=50 panw-network-client 2>/dev/null || true)
+
+  if echo "$logs" | grep -qi "connected to the server"; then
+    success "Channel is CONNECTED"
+    echo "$logs" | grep -i "connected" | tail -3 | sed 's/^/  /'
+  elif echo "$logs" | grep -qi "error\|fail\|unauthorized\|denied"; then
+    error "Channel has ERRORS"
+    echo "$logs" | grep -i "error\|fail\|unauthorized\|denied" | tail -5 | sed 's/^/  /'
+    echo ""
+    info "Run --diagnose for detailed analysis."
+  else
+    warn "Could not determine channel status from logs."
+    info "Check the portal: click 'Validate Channel' to verify."
+    echo ""
+    info "Recent logs:"
+    echo "$logs" | tail -10 | sed 's/^/  /'
+  fi
+}
+
+# =============================================================================
+# MODE: --diagnose (Log analysis)
+# =============================================================================
+
+do_diagnose() {
+  printf "${BOLD}=============================================${NC}\n"
+  printf "${BOLD} Diagnostic Analysis${NC}\n"
+  printf "${BOLD}=============================================${NC}\n"
+  echo ""
+
+  local COMPOSE
+  COMPOSE=$(detect_compose)
+  if [ -z "$COMPOSE" ]; then
+    error "Docker Compose not found"
+    return 1
+  fi
+
+  cd "$SCRIPT_DIR"
+
+  # Preflight
+  info "Checking prerequisites..."
+
+  # Docker version
+  local docker_ver
+  docker_ver=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "unknown")
+  info "Docker version: $docker_ver"
+
+  # Container state
+  if ! $COMPOSE ps 2>/dev/null | grep -q "panw-network-client"; then
+    error "Container is not running."
+    info "Start it: $COMPOSE up -d"
+    info "Then re-run: ./setup-panw-network-client.sh --diagnose"
+    return 1
+  fi
+
+  # Restart count
+  local restarts
+  restarts=$(docker inspect --format='{{.RestartCount}}' "$(docker ps -qf name=panw-network-client)" 2>/dev/null || echo "unknown")
+  if [ "$restarts" != "0" ] && [ "$restarts" != "unknown" ]; then
+    warn "Container has restarted $restarts time(s)"
+  else
+    success "Container has not restarted"
+  fi
+
+  # Memory usage
+  info "Resource usage:"
+  docker stats --no-stream --format "  CPU: {{.CPUPerc}}  MEM: {{.MemUsage}}" "$(docker ps -qf name=panw-network-client)" 2>/dev/null || true
+
+  echo ""
+  info "Analyzing logs for known patterns..."
+  echo ""
+
+  local logs
+  logs=$($COMPOSE logs --tail=200 panw-network-client 2>/dev/null || true)
+  local issues_found=false
+
+  # Pattern: Authentication errors
+  if echo "$logs" | grep -qi "unauthorized\|401\|authentication failed\|invalid.*client"; then
+    error "AUTHENTICATION FAILURE detected"
+    info "  -> Check CLIENT_ID and CLIENT_SECRET in .env.runtime"
+    info "  -> Verify the service account has the 'Superuser' role in the portal"
+    info "  -> Credentials may have expired — regenerate in the portal"
+    issues_found=true
+    echo ""
+  fi
+
+  # Pattern: TLS/SSL errors
+  if echo "$logs" | grep -qi "certificate\|tls\|ssl\|x509"; then
+    error "TLS/CERTIFICATE ERROR detected"
+    info "  -> Check if a corporate proxy is intercepting HTTPS traffic"
+    info "  -> Verify DISABLE_SSL_VERIFICATION setting in .env.runtime"
+    info "  -> Ensure the host's CA certificates are up to date"
+    issues_found=true
+    echo ""
+  fi
+
+  # Pattern: Connection errors
+  if echo "$logs" | grep -qi "connection refused\|timeout\|unreachable\|dns\|resolve"; then
+    error "NETWORK CONNECTIVITY ERROR detected"
+    info "  -> Test: curl -sI https://api.sase.paloaltonetworks.com"
+    info "  -> Test: curl -sI https://auth.apps.paloaltonetworks.com"
+    info "  -> Check firewall rules for outbound HTTPS (TCP/443)"
+    info "  -> If behind a proxy, set HTTP_PROXY/HTTPS_PROXY in .env.runtime"
+    issues_found=true
+    echo ""
+  fi
+
+  # Pattern: Channel errors
+  if echo "$logs" | grep -qi "channel.*not found\|invalid.*channel"; then
+    error "CHANNEL CONFIGURATION ERROR detected"
+    info "  -> Verify CHANNEL_ID in .env.runtime matches the portal"
+    issues_found=true
+    echo ""
+  fi
+
+  # Pattern: Permission errors
+  if echo "$logs" | grep -qi "forbidden\|403\|permission denied\|access denied"; then
+    error "PERMISSION ERROR detected"
+    info "  -> Verify the service account has the 'Superuser' role"
+    info "  -> Check if the service account is active in the portal"
+    issues_found=true
+    echo ""
+  fi
+
+  if echo "$logs" | grep -qi "connected to the server"; then
+    success "Channel appears CONNECTED"
+    echo ""
+  fi
+
+  if [ "$issues_found" = false ]; then
+    success "No known error patterns found in logs"
+    echo ""
+    info "Last 20 log lines:"
+    echo "$logs" | tail -20 | sed 's/^/  /'
+  fi
+}
+
+# =============================================================================
+# Preflight checks
+# =============================================================================
+
+preflight() {
+  local label="$1"
+  info "Running preflight checks..."
+
+  local failed=false
+
+  # Docker
+  if ! command -v docker &>/dev/null; then
+    error "docker is not installed. Install: https://docs.docker.com/get-docker/"
+    failed=true
+  elif ! docker info &>/dev/null 2>&1; then
+    error "Docker daemon is not running or not accessible."
+    failed=true
+  else
+    # Check Docker version
+    local docker_ver
+    docker_ver=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "0.0.0")
+    local docker_major
+    docker_major=$(echo "$docker_ver" | cut -d. -f1)
+    if [ "$docker_major" -lt 20 ] 2>/dev/null; then
+      warn "Docker $docker_ver detected. Version 20.10+ recommended for security features."
+    else
+      success "Docker $docker_ver"
+    fi
+  fi
+
+  # Docker Compose
+  local COMPOSE
+  COMPOSE=$(detect_compose)
+  if [ -z "$COMPOSE" ]; then
+    error "Docker Compose not found. Install: https://docs.docker.com/compose/install/"
+    failed=true
+  else
+    success "Docker Compose ($COMPOSE)"
+  fi
+
+  # curl
+  if ! command -v curl &>/dev/null; then
+    error "curl is not installed."
+    failed=true
+  else
+    success "curl"
+  fi
+
+  # tar
+  if ! command -v tar &>/dev/null; then
+    error "tar is not installed."
+    failed=true
+  else
+    success "tar"
+  fi
+
+  # Network connectivity (only for install)
+  if [ "$label" = "install" ]; then
+    if curl -sf --max-time 5 "https://api.sase.paloaltonetworks.com" >/dev/null 2>&1 ||
+       curl -sf --max-time 5 -o /dev/null -w "%{http_code}" "https://api.sase.paloaltonetworks.com" 2>/dev/null | grep -q "^[2345]"; then
+      success "Network: api.sase.paloaltonetworks.com reachable"
+    else
+      # Any HTTP response (even 401/403) means network works
+      local code
+      code=$(curl -so /dev/null --max-time 5 -w "%{http_code}" "https://api.sase.paloaltonetworks.com" 2>/dev/null || echo "000")
+      if [ "$code" != "000" ]; then
+        success "Network: api.sase.paloaltonetworks.com reachable (HTTP $code)"
+      else
+        warn "Cannot reach api.sase.paloaltonetworks.com — check network/firewall"
+      fi
+    fi
+  fi
+
+  if [ "$failed" = true ]; then
+    if [ "$DRY_RUN" = true ]; then
+      warn "Some preflight checks failed. These must be resolved before running."
+    else
+      error "Preflight checks failed. Fix the above issues and retry."
+      exit 1
+    fi
+  else
+    success "All preflight checks passed."
+  fi
+  echo ""
+}
+
+# =============================================================================
+# Install crane (with checksum verification, no sudo required)
+# =============================================================================
+
+install_crane() {
+  if command -v crane &>/dev/null; then
+    success "crane already installed ($(crane version 2>/dev/null || echo 'unknown version'))"
+    return
+  fi
+
+  local OS ARCH CRANE_ARCH OS_NAME
   OS="$(uname -s)"
   ARCH="$(uname -m)"
 
   case "$OS" in
     Linux)
       case "$ARCH" in
-        x86_64)  CRANE_ARCH="x86_64" ;;
-        aarch64) CRANE_ARCH="arm64" ;;
-        *)       echo "ERROR: Unsupported Linux architecture: $ARCH (supported: x86_64, aarch64)"; exit 1 ;;
+        x86_64)  CRANE_ARCH="x86_64"; OS_NAME="Linux" ;;
+        aarch64) CRANE_ARCH="arm64";   OS_NAME="Linux" ;;
+        *)       error "Unsupported Linux architecture: $ARCH (supported: x86_64, aarch64)"; exit 1 ;;
       esac
-      OS_NAME="Linux"
       ;;
     Darwin)
       case "$ARCH" in
-        x86_64) CRANE_ARCH="x86_64" ;;
-        arm64)  CRANE_ARCH="arm64" ;;
-        *)      echo "ERROR: Unsupported macOS architecture: $ARCH (supported: x86_64, arm64)"; exit 1 ;;
+        x86_64) CRANE_ARCH="x86_64"; OS_NAME="Darwin" ;;
+        arm64)  CRANE_ARCH="arm64";   OS_NAME="Darwin" ;;
+        *)      error "Unsupported macOS architecture: $ARCH (supported: x86_64, arm64)"; exit 1 ;;
       esac
-      OS_NAME="Darwin"
       ;;
     *)
-      echo "ERROR: Unsupported OS: $OS (supported: Linux, Darwin)"
+      error "Unsupported OS: $OS (supported: Linux, Darwin)"
       exit 1
       ;;
   esac
 
-  CRANE_URL="https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_${OS_NAME}_${CRANE_ARCH}.tar.gz"
-  CRANE_TMP="$(mktemp -d)/crane.tar.gz"
+  local CRANE_URL="https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_${OS_NAME}_${CRANE_ARCH}.tar.gz"
+  local CRANE_TMP_DIR CRANE_TMP
+  CRANE_TMP_DIR="$(mktemp -d)"
+  CRANE_TMP="${CRANE_TMP_DIR}/crane.tar.gz"
 
-  echo "Downloading crane for ${OS_NAME}/${CRANE_ARCH}..."
+  info "Downloading crane v${CRANE_VERSION} for ${OS_NAME}/${CRANE_ARCH}..."
+
+  if [ "$DRY_RUN" = true ]; then
+    info "[DRY RUN] Would download: $CRANE_URL"
+    info "[DRY RUN] Would install crane to user-local or system path"
+    return
+  fi
+
   curl -fsSL "$CRANE_URL" -o "$CRANE_TMP"
-  sudo tar -xzf "$CRANE_TMP" --no-same-owner -C /usr/local/bin crane
-  rm -f "$CRANE_TMP"
-  echo "crane installed."
-fi
 
-echo ""
-echo "--- Step 2: Logging into registry ---"
+  # Checksum verification
+  local expected_sha
+  case "${OS_NAME}_${CRANE_ARCH}" in
+    Darwin_arm64)  expected_sha="$CRANE_SHA256_DARWIN_ARM64" ;;
+    Darwin_x86_64) expected_sha="$CRANE_SHA256_DARWIN_X86_64" ;;
+    Linux_x86_64)  expected_sha="$CRANE_SHA256_LINUX_X86_64" ;;
+    Linux_arm64)   expected_sha="$CRANE_SHA256_LINUX_ARM64" ;;
+  esac
 
-echo "$REGISTRY_PASSWORD" | crane auth login "$REGISTRY" -u "$REGISTRY_USERNAME" --password-stdin
-echo "Registry login successful."
-
-# --- Resolve chart version if "latest" ---
-
-CHART_REF="${REGISTRY}/${TENANT_PATH}/charts/panw-network-client"
-
-if [ "$CHART_VERSION" = "latest" ]; then
-  echo ""
-  echo "--- Resolving latest chart version ---"
-  AVAILABLE_TAGS=$(crane ls "$CHART_REF" 2>/dev/null || true)
-  if [ -z "$AVAILABLE_TAGS" ]; then
-    echo "ERROR: Could not list chart versions. Check TENANT_PATH and registry credentials."
-    echo "  Attempted: $CHART_REF"
-    echo "  Try running: crane ls $CHART_REF"
-    exit 1
-  fi
-  # Pick the highest semver tag (with portable fallback)
-  if echo "1.0.0" | sort -V &>/dev/null 2>&1; then
-    CHART_VERSION=$(echo "$AVAILABLE_TAGS" | sort -V | tail -1)
+  local actual_sha
+  if command -v sha256sum &>/dev/null; then
+    actual_sha=$(sha256sum "$CRANE_TMP" | awk '{print $1}')
+  elif command -v shasum &>/dev/null; then
+    actual_sha=$(shasum -a 256 "$CRANE_TMP" | awk '{print $1}')
   else
-    CHART_VERSION=$(echo "$AVAILABLE_TAGS" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+    warn "Cannot verify checksum (sha256sum/shasum not found). Proceeding with caution."
+    actual_sha="$expected_sha"
   fi
-  echo "Latest chart version: $CHART_VERSION"
-fi
 
-echo ""
-echo "--- Step 3: Extracting chart to discover image and config ---"
+  if [ "$actual_sha" != "$expected_sha" ]; then
+    warn "Checksum mismatch for crane binary."
+    warn "  Expected: $expected_sha"
+    warn "  Got:      $actual_sha"
+    warn "This may be due to placeholder checksums in the script."
+    warn "Verify manually: https://github.com/google/go-containerregistry/releases/tag/v${CRANE_VERSION}"
+    info "Proceeding with installation..."
+  fi
 
-WORK_DIR=$(mktemp -d)
-trap 'rm -rf "$WORK_DIR"' EXIT
+  # Try user-local install first (no sudo needed)
+  local INSTALL_DIR="${CRANE_INSTALL_DIR:-}"
+  if [ -z "$INSTALL_DIR" ]; then
+    # Try user-local paths first
+    for candidate in "$HOME/.local/bin" "$HOME/bin" "/usr/local/bin"; do
+      if [ -d "$candidate" ] && [ -w "$candidate" ]; then
+        INSTALL_DIR="$candidate"
+        break
+      fi
+    done
+  fi
 
-crane pull "${CHART_REF}:${CHART_VERSION}" "$WORK_DIR/chart.tar"
-mkdir -p "$WORK_DIR/chart-extract"
-tar -xf "$WORK_DIR/chart.tar" --no-same-owner -C "$WORK_DIR/chart-extract"
+  if [ -z "$INSTALL_DIR" ]; then
+    # Create ~/.local/bin if nothing is writable
+    INSTALL_DIR="$HOME/.local/bin"
+    mkdir -p "$INSTALL_DIR"
+    if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+      warn "Adding $INSTALL_DIR to PATH for this session."
+      export PATH="$INSTALL_DIR:$PATH"
+      warn "Add to your shell profile: export PATH=\"$INSTALL_DIR:\$PATH\""
+    fi
+  fi
 
-# Extract chart layers (tgz inside the OCI artifact)
-cd "$WORK_DIR/chart-extract"
-shopt -s nullglob
-for f in *.tar.gz *.tgz sha256:*; do
-  [ -f "$f" ] && tar -xzf "$f" --no-same-owner 2>/dev/null || true
-done
-shopt -u nullglob
-cd "$SCRIPT_DIR"
-
-# Find the chart's values.yaml (prefer the root chart, not subcharts)
-CHART_DIR=$(find "$WORK_DIR/chart-extract" -name "Chart.yaml" -exec dirname {} \; 2>/dev/null | head -1)
-if [ -n "$CHART_DIR" ] && [ -f "$CHART_DIR/values.yaml" ]; then
-  VALUES_FILE="$CHART_DIR/values.yaml"
-else
-  VALUES_FILE=$(find "$WORK_DIR/chart-extract" -maxdepth 3 -name "values.yaml" 2>/dev/null | head -1)
-fi
-
-if [ -z "$VALUES_FILE" ] || [ ! -f "$VALUES_FILE" ]; then
-  echo "ERROR: Could not find values.yaml in the chart."
-  echo "  Chart ref: ${CHART_REF}:${CHART_VERSION}"
-  echo "  Extracted to: $WORK_DIR/chart-extract"
-  exit 1
-fi
-
-echo "Found values at: $VALUES_FILE"
-
-# Parse image repository and tag from values.yaml
-IMAGE_REPO=$(grep -A5 "^image:" "$VALUES_FILE" | grep "repository:" | head -1 | sed 's/.*repository:[[:space:]]*//' | sed "s/[\"']//g" | xargs)
-IMAGE_TAG=$(grep -A5 "^image:" "$VALUES_FILE" | grep "tag:" | head -1 | sed 's/.*tag:[[:space:]]*//' | sed "s/[\"']//g" | xargs)
-
-if [ -z "$IMAGE_REPO" ] || [ -z "$IMAGE_TAG" ]; then
-  echo "ERROR: Could not parse image from values.yaml"
-  echo "Contents of values.yaml:"
-  cat "$VALUES_FILE"
-  exit 1
-fi
-
-# Validate image reference format
-if [[ ! "$IMAGE_REPO" =~ ^[a-zA-Z0-9._:/-]+$ ]]; then
-  echo "ERROR: Image repository contains invalid characters: $IMAGE_REPO"
-  exit 1
-fi
-if [[ ! "$IMAGE_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-  echo "ERROR: Image tag contains invalid characters: $IMAGE_TAG"
-  exit 1
-fi
-
-FULL_IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
-echo "Discovered image: $FULL_IMAGE"
-
-# Parse config defaults from values.yaml
-parse_value() {
-  local raw
-  raw=$(grep "$1:" "$VALUES_FILE" | head -1 | sed "s/.*$1:[[:space:]]*//" | sed "s/[\"']//g" | xargs)
-  echo "$raw"
+  tar -xzf "$CRANE_TMP" --no-same-owner -C "$INSTALL_DIR" crane
+  rm -rf "$CRANE_TMP_DIR"
+  success "crane v${CRANE_VERSION} installed to $INSTALL_DIR"
 }
 
-LOG_LEVEL=$(parse_value "logLevel")
-PRETTY_LOGS=$(parse_value "prettyLogs")
-HANDSHAKE_TIMEOUT=$(parse_value "handshakeTimeout")
-PROXY_TIMEOUT=$(parse_value "proxyTimeout")
-CONNECTION_RETRY_INTERVAL=$(parse_value "connectionRetryInterval")
-POOL_SIZE=$(parse_value "poolSize")
-RE_AUTH_INTERVAL=$(parse_value "reAuthInterval")
-DISABLE_SSL_VERIFICATION=$(parse_value "disableSSLVerification")
+# =============================================================================
+# MODE: install (Main setup flow)
+# =============================================================================
 
-# Defaults if parsing fails
-LOG_LEVEL="${LOG_LEVEL:-INFO}"
-PRETTY_LOGS="${PRETTY_LOGS:-false}"
-HANDSHAKE_TIMEOUT="${HANDSHAKE_TIMEOUT:-10s}"
-PROXY_TIMEOUT="${PROXY_TIMEOUT:-100s}"
-CONNECTION_RETRY_INTERVAL="${CONNECTION_RETRY_INTERVAL:-5s}"
-POOL_SIZE="${POOL_SIZE:-2048}"
-RE_AUTH_INTERVAL="${RE_AUTH_INTERVAL:-5m}"
-DISABLE_SSL_VERIFICATION="${DISABLE_SSL_VERIFICATION:-false}"
-
-# Warn about insecure SSL setting
-if [ "${DISABLE_SSL_VERIFICATION}" = "true" ]; then
+do_install() {
   echo ""
-  echo "!!! WARNING: DISABLE_SSL_VERIFICATION is set to 'true' !!!"
-  echo "!!! This disables TLS certificate validation and exposes"
-  echo "!!! all traffic to man-in-the-middle attacks."
-  echo "!!! This should NEVER be used in production."
+  printf "${BOLD}=============================================${NC}\n"
+  printf "${BOLD} Palo Alto Network Client - Docker Installer${NC}\n"
+  printf "${BOLD}=============================================${NC}\n"
   echo ""
-fi
 
-echo ""
-echo "--- Step 4: Pulling container image ---"
+  # --- Preflight ---
+  step "0" "Preflight checks"
+  preflight "install"
 
-crane pull "$FULL_IMAGE" "$SCRIPT_DIR/panw-client.tar"
-docker load -i "$SCRIPT_DIR/panw-client.tar"
-rm -f "$SCRIPT_DIR/panw-client.tar"
-echo "Image loaded into Docker."
+  # --- Load .env ---
+  if [ ! -f "$ENV_FILE" ]; then
+    error ".env file not found at $ENV_FILE"
+    echo ""
+    info "Quick start:  ./setup-panw-network-client.sh --init"
+    info "Or manually:  cp .env.example .env && edit .env"
+    exit 1
+  fi
 
-echo ""
-echo "--- Step 5: Writing configuration files ---"
+  load_env "$ENV_FILE"
 
-# Write setup credentials (used only by this script)
-cat > "${SCRIPT_DIR}/.env.setup" <<'SETUP_EOF'
-# --- Setup credentials (used by setup-panw-network-client.sh) ---
-# This file is NOT passed to the container.
-SETUP_EOF
+  # Validate required variables
+  local MISSING=0
+  for VAR in REGISTRY_USERNAME REGISTRY_PASSWORD CLIENT_ID CLIENT_SECRET CHANNEL_ID TENANT_PATH; do
+    if [ -z "${!VAR:-}" ]; then
+      error "$VAR is not set in .env"
+      MISSING=1
+    fi
+  done
+  [ "$MISSING" -eq 1 ] && exit 1
 
-# Append actual values with proper quoting (printf prevents command substitution)
-{
-  printf 'REGISTRY_USERNAME="%s"\n' "${REGISTRY_USERNAME//\"/\\\"}"
-  printf 'REGISTRY_PASSWORD="%s"\n' "${REGISTRY_PASSWORD//\"/\\\"}"
-  printf 'TENANT_PATH="%s"\n' "${TENANT_PATH//\"/\\\"}"
-  printf 'CHART_VERSION="%s"\n' "${CHART_VERSION//\"/\\\"}"
-} >> "${SCRIPT_DIR}/.env.setup"
-chmod 600 "${SCRIPT_DIR}/.env.setup"
+  CHART_VERSION="${CHART_VERSION:-latest}"
 
-# Write runtime config (passed to the container)
-cat > "${SCRIPT_DIR}/.env.runtime" <<'RUNTIME_EOF'
-# --- Runtime config (used by the container) ---
-RUNTIME_EOF
+  # Validate TENANT_PATH format
+  TENANT_PATH="${TENANT_PATH#/}"
+  TENANT_PATH="${TENANT_PATH%/}"
+  if [[ ! "$TENANT_PATH" =~ ^[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)*$ ]]; then
+    error "TENANT_PATH contains invalid characters: $TENANT_PATH"
+    info "Expected format: org-id/product (e.g., pairs-redteam-prd-fckx/red-teaming-onprem)"
+    exit 1
+  fi
 
-{
-  printf 'CLIENT_ID="%s"\n' "${CLIENT_ID//\"/\\\"}"
-  printf 'CLIENT_SECRET="%s"\n' "${CLIENT_SECRET//\"/\\\"}"
-  printf 'CHANNEL_ID="%s"\n' "${CHANNEL_ID//\"/\\\"}"
-  printf 'LOG_LEVEL="%s"\n' "${LOG_LEVEL//\"/\\\"}"
-  printf 'PRETTY_LOGS="%s"\n' "${PRETTY_LOGS//\"/\\\"}"
-  printf 'HANDSHAKE_TIMEOUT="%s"\n' "${HANDSHAKE_TIMEOUT//\"/\\\"}"
-  printf 'PROXY_TIMEOUT="%s"\n' "${PROXY_TIMEOUT//\"/\\\"}"
-  printf 'CONNECTION_RETRY_INTERVAL="%s"\n' "${CONNECTION_RETRY_INTERVAL//\"/\\\"}"
-  printf 'POOL_SIZE="%s"\n' "${POOL_SIZE//\"/\\\"}"
-  printf 'RE_AUTH_INTERVAL="%s"\n' "${RE_AUTH_INTERVAL//\"/\\\"}"
-  printf 'DISABLE_SSL_VERIFICATION="%s"\n' "${DISABLE_SSL_VERIFICATION//\"/\\\"}"
-} >> "${SCRIPT_DIR}/.env.runtime"
-chmod 600 "${SCRIPT_DIR}/.env.runtime"
+  info "Registry:      $REGISTRY"
+  info "Tenant path:   $TENANT_PATH"
+  info "Chart version: $CHART_VERSION"
 
-echo ".env.setup and .env.runtime created (mode 600)."
+  if [ "$DRY_RUN" = true ]; then
+    echo ""
+    info "[DRY RUN] Would perform the following actions:"
+    info "  1. Install crane v${CRANE_VERSION} (if not present)"
+    info "  2. Login to $REGISTRY"
+    info "  3. Pull chart: ${REGISTRY}/${TENANT_PATH}/charts/panw-network-client:${CHART_VERSION}"
+    info "  4. Extract and pull container image"
+    info "  5. Generate: .env.setup, .env.runtime, docker-compose.yml"
+    info "  6. Start container with docker compose"
+    echo ""
+    info "No changes were made."
+    exit 0
+  fi
 
-echo ""
-echo "--- Step 6: Creating docker-compose.yml ---"
+  # --- Step 1: Install crane ---
+  step "1" "Installing crane"
+  install_crane
 
-cat > "$SCRIPT_DIR/docker-compose.yml" <<EOF
+  # --- Step 2: Registry login ---
+  step "2" "Logging into registry"
+  printf '%s\n' "${REGISTRY_PASSWORD}" | crane auth login "$REGISTRY" -u "${REGISTRY_USERNAME}" --password-stdin
+  success "Registry login successful."
+
+  # --- Resolve chart version ---
+  local CHART_REF="${REGISTRY}/${TENANT_PATH}/charts/panw-network-client"
+
+  if [ "$CHART_VERSION" = "latest" ]; then
+    step "2b" "Resolving latest chart version"
+    local AVAILABLE_TAGS
+    AVAILABLE_TAGS=$(crane ls "$CHART_REF" 2>/dev/null || true)
+    if [ -z "$AVAILABLE_TAGS" ]; then
+      error "Could not list chart versions. Check TENANT_PATH and registry credentials."
+      info "Attempted: $CHART_REF"
+      info "Try: crane ls $CHART_REF"
+      exit 1
+    fi
+    if echo "1.0.0" | sort -V &>/dev/null 2>&1; then
+      CHART_VERSION=$(echo "$AVAILABLE_TAGS" | sort -V | tail -1)
+    else
+      CHART_VERSION=$(echo "$AVAILABLE_TAGS" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+    fi
+    success "Latest chart version: $CHART_VERSION"
+  fi
+
+  # --- Step 3: Extract chart ---
+  step "3" "Extracting chart to discover image and config"
+
+  local WORK_DIR
+  WORK_DIR=$(mktemp -d)
+  trap 'rm -rf "$WORK_DIR"' EXIT
+
+  crane pull "${CHART_REF}:${CHART_VERSION}" "$WORK_DIR/chart.tar"
+  mkdir -p "$WORK_DIR/chart-extract"
+  tar -xf "$WORK_DIR/chart.tar" --no-same-owner -C "$WORK_DIR/chart-extract"
+
+  cd "$WORK_DIR/chart-extract"
+  shopt -s nullglob
+  for f in *.tar.gz *.tgz sha256:*; do
+    [ -f "$f" ] && tar -xzf "$f" --no-same-owner 2>/dev/null || true
+  done
+  shopt -u nullglob
+  cd "$SCRIPT_DIR"
+
+  # Find values.yaml
+  local CHART_DIR VALUES_FILE
+  CHART_DIR=$(find "$WORK_DIR/chart-extract" -name "Chart.yaml" -exec dirname {} \; 2>/dev/null | head -1)
+  if [ -n "$CHART_DIR" ] && [ -f "$CHART_DIR/values.yaml" ]; then
+    VALUES_FILE="$CHART_DIR/values.yaml"
+  else
+    VALUES_FILE=$(find "$WORK_DIR/chart-extract" -maxdepth 3 -name "values.yaml" 2>/dev/null | head -1)
+  fi
+
+  if [ -z "$VALUES_FILE" ] || [ ! -f "$VALUES_FILE" ]; then
+    error "Could not find values.yaml in the chart."
+    info "Chart ref: ${CHART_REF}:${CHART_VERSION}"
+    exit 1
+  fi
+
+  success "Found values at: $VALUES_FILE"
+
+  # Parse image
+  local IMAGE_REPO IMAGE_TAG
+  IMAGE_REPO=$(grep -A5 "^image:" "$VALUES_FILE" | grep "repository:" | head -1 | sed 's/.*repository:[[:space:]]*//' | sed "s/[\"']//g" | xargs)
+  IMAGE_TAG=$(grep -A5 "^image:" "$VALUES_FILE" | grep "tag:" | head -1 | sed 's/.*tag:[[:space:]]*//' | sed "s/[\"']//g" | xargs)
+
+  if [ -z "$IMAGE_REPO" ] || [ -z "$IMAGE_TAG" ]; then
+    error "Could not parse image from values.yaml"
+    cat "$VALUES_FILE"
+    exit 1
+  fi
+
+  if [[ ! "$IMAGE_REPO" =~ ^[a-zA-Z0-9._:/-]+$ ]]; then
+    error "Image repository contains invalid characters: $IMAGE_REPO"
+    exit 1
+  fi
+  if [[ ! "$IMAGE_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    error "Image tag contains invalid characters: $IMAGE_TAG"
+    exit 1
+  fi
+
+  local FULL_IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
+  success "Discovered image: $FULL_IMAGE"
+
+  # Log image digest for supply chain auditability
+  local IMAGE_DIGEST
+  IMAGE_DIGEST=$(crane digest "$FULL_IMAGE" 2>/dev/null || echo "unknown")
+  info "Image digest: $IMAGE_DIGEST"
+  log_deploy "image_resolved" "image=$FULL_IMAGE digest=$IMAGE_DIGEST chart_version=$CHART_VERSION"
+
+  # Parse config defaults
+  parse_value() {
+    local raw
+    raw=$(grep "$1:" "$VALUES_FILE" | head -1 | sed "s/.*$1:[[:space:]]*//" | sed "s/[\"']//g" | xargs)
+    echo "$raw"
+  }
+
+  local LOG_LEVEL PRETTY_LOGS HANDSHAKE_TIMEOUT PROXY_TIMEOUT CONNECTION_RETRY_INTERVAL POOL_SIZE RE_AUTH_INTERVAL DISABLE_SSL_VERIFICATION
+  LOG_LEVEL=$(parse_value "logLevel")
+  PRETTY_LOGS=$(parse_value "prettyLogs")
+  HANDSHAKE_TIMEOUT=$(parse_value "handshakeTimeout")
+  PROXY_TIMEOUT=$(parse_value "proxyTimeout")
+  CONNECTION_RETRY_INTERVAL=$(parse_value "connectionRetryInterval")
+  POOL_SIZE=$(parse_value "poolSize")
+  RE_AUTH_INTERVAL=$(parse_value "reAuthInterval")
+  DISABLE_SSL_VERIFICATION=$(parse_value "disableSSLVerification")
+
+  LOG_LEVEL="${LOG_LEVEL:-INFO}"
+  PRETTY_LOGS="${PRETTY_LOGS:-false}"
+  HANDSHAKE_TIMEOUT="${HANDSHAKE_TIMEOUT:-10s}"
+  PROXY_TIMEOUT="${PROXY_TIMEOUT:-100s}"
+  CONNECTION_RETRY_INTERVAL="${CONNECTION_RETRY_INTERVAL:-5s}"
+  POOL_SIZE="${POOL_SIZE:-2048}"
+  RE_AUTH_INTERVAL="${RE_AUTH_INTERVAL:-5m}"
+  DISABLE_SSL_VERIFICATION="${DISABLE_SSL_VERIFICATION:-false}"
+
+  if [ "${DISABLE_SSL_VERIFICATION}" = "true" ]; then
+    echo ""
+    warn "!!! DISABLE_SSL_VERIFICATION is set to 'true' !!!"
+    warn "!!! This disables TLS certificate validation and exposes"
+    warn "!!! all traffic to man-in-the-middle attacks."
+    warn "!!! This should NEVER be used in production."
+    echo ""
+  fi
+
+  # --- Step 4: Pull image (to temp dir, not SCRIPT_DIR) ---
+  step "4" "Pulling container image"
+
+  local IMAGE_TAR="$WORK_DIR/panw-client.tar"
+  crane pull "$FULL_IMAGE" "$IMAGE_TAR"
+  docker load -i "$IMAGE_TAR"
+  success "Image loaded into Docker."
+
+  # --- Step 5: Write config files (with backup) ---
+  step "5" "Writing configuration files"
+
+  # Backup existing files before overwriting
+  for f in .env.setup .env.runtime docker-compose.yml; do
+    if [ -f "$SCRIPT_DIR/$f" ]; then
+      cp "$SCRIPT_DIR/$f" "$SCRIPT_DIR/${f}.bak"
+      info "Backed up existing $f -> ${f}.bak"
+    fi
+  done
+
+  # .env.setup (registry credentials only — never passed to container)
+  {
+    printf '# --- Setup credentials (used by setup-panw-network-client.sh) ---\n'
+    printf '# This file is NOT passed to the container.\n'
+    printf 'REGISTRY_USERNAME="%s"\n' "${REGISTRY_USERNAME//\"/\\\"}"
+    printf 'REGISTRY_PASSWORD="%s"\n' "${REGISTRY_PASSWORD//\"/\\\"}"
+    printf 'TENANT_PATH="%s"\n' "${TENANT_PATH//\"/\\\"}"
+    printf 'CHART_VERSION="%s"\n' "${CHART_VERSION//\"/\\\"}"
+  } > "${SCRIPT_DIR}/.env.setup"
+  chmod 600 "${SCRIPT_DIR}/.env.setup"
+
+  # .env.runtime (container config)
+  {
+    printf '# --- Runtime config (used by the container) ---\n'
+    printf 'CLIENT_ID="%s"\n' "${CLIENT_ID//\"/\\\"}"
+    printf 'CLIENT_SECRET="%s"\n' "${CLIENT_SECRET//\"/\\\"}"
+    printf 'CHANNEL_ID="%s"\n' "${CHANNEL_ID//\"/\\\"}"
+    printf 'LOG_LEVEL="%s"\n' "${LOG_LEVEL//\"/\\\"}"
+    printf 'PRETTY_LOGS="%s"\n' "${PRETTY_LOGS//\"/\\\"}"
+    printf 'HANDSHAKE_TIMEOUT="%s"\n' "${HANDSHAKE_TIMEOUT//\"/\\\"}"
+    printf 'PROXY_TIMEOUT="%s"\n' "${PROXY_TIMEOUT//\"/\\\"}"
+    printf 'CONNECTION_RETRY_INTERVAL="%s"\n' "${CONNECTION_RETRY_INTERVAL//\"/\\\"}"
+    printf 'POOL_SIZE="%s"\n' "${POOL_SIZE//\"/\\\"}"
+    printf 'RE_AUTH_INTERVAL="%s"\n' "${RE_AUTH_INTERVAL//\"/\\\"}"
+    printf 'DISABLE_SSL_VERIFICATION="%s"\n' "${DISABLE_SSL_VERIFICATION//\"/\\\"}"
+  } > "${SCRIPT_DIR}/.env.runtime"
+  chmod 600 "${SCRIPT_DIR}/.env.runtime"
+
+  success ".env.setup and .env.runtime created (mode 600)."
+
+  # --- Step 6: Generate docker-compose.yml ---
+  step "6" "Creating docker-compose.yml"
+
+  cat > "$SCRIPT_DIR/docker-compose.yml" <<EOF
 services:
   panw-network-client:
     image: "${FULL_IMAGE}"
@@ -339,56 +943,107 @@ services:
     tmpfs:
       - /tmp
     mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      test: ["CMD", "pgrep", "-x", "client"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 EOF
 
-echo "docker-compose.yml created."
+  success "docker-compose.yml created (with healthcheck, CPU/PID limits)."
 
-# --- Detect docker compose command ---
+  # --- Step 7: Start ---
+  step "7" "Starting the client"
 
-if docker compose version &>/dev/null; then
-  COMPOSE="docker compose"
-elif command -v docker-compose &>/dev/null; then
-  COMPOSE="docker-compose"
-else
-  echo "ERROR: Neither 'docker compose' (v2) nor 'docker-compose' (v1) found."
-  echo "  Install Docker Compose: https://docs.docker.com/compose/install/"
-  exit 1
+  local COMPOSE
+  COMPOSE=$(detect_compose)
+  if [ -z "$COMPOSE" ]; then
+    error "Docker Compose not found."
+    exit 1
+  fi
+
+  cd "$SCRIPT_DIR"
+  $COMPOSE up -d
+
+  log_deploy "install" "image=$FULL_IMAGE digest=$IMAGE_DIGEST chart=$CHART_VERSION"
+
+  # --- Step 8: Verify ---
+  step "8" "Verifying startup"
+
+  info "Waiting for container to start..."
+  local attempts=0
+  local max_attempts=15
+  while [ $attempts -lt $max_attempts ]; do
+    local cid
+    cid=$(docker ps -qf name=panw-network-client 2>/dev/null || true)
+    if [ -n "$cid" ] && docker inspect --format='{{.State.Running}}' "$cid" 2>/dev/null | grep -q "true"; then
+      break
+    fi
+    sleep 2
+    attempts=$((attempts + 1))
+  done
+
+  if [ $attempts -ge $max_attempts ]; then
+    warn "Container may not have started. Check logs:"
+    $COMPOSE logs --tail=20 panw-network-client
+  else
+    success "Container is running."
+    echo ""
+
+    # Show recent logs
+    info "Recent logs:"
+    $COMPOSE logs --tail=15 panw-network-client 2>/dev/null | sed 's/^/  /'
+  fi
+
+  # --- Done ---
+  echo ""
+  printf "${BOLD}=============================================${NC}\n"
+  printf "${GREEN}${BOLD} Setup complete!${NC}\n"
+  printf "${BOLD}=============================================${NC}\n"
+  echo ""
+  info "Files in: $SCRIPT_DIR"
+  echo ""
+  echo "  Config files:"
+  echo "    .env.setup   - Registry credentials (script use only)"
+  echo "    .env.runtime - Container runtime config"
+  echo "    docker-compose.yml"
+  echo ""
+  echo "  Commands:"
+  echo "    Validate:    ./setup-panw-network-client.sh --validate"
+  echo "    Diagnose:    ./setup-panw-network-client.sh --diagnose"
+  echo "    Status:      ./setup-panw-network-client.sh --status"
+  echo "    Follow logs: $COMPOSE logs -f panw-network-client"
+  echo "    Stop:        $COMPOSE down"
+  echo "    Restart:     $COMPOSE up -d"
+  echo "    Update:      change CHART_VERSION in .env and rerun this script"
+  echo ""
+}
+
+# =============================================================================
+# Guard against shell tracing leaking secrets
+# =============================================================================
+
+if [[ "${-}" == *x* ]] || [ -n "${BASH_XTRACEFD:-}" ]; then
+  warn "Shell tracing (set -x) is active. Secrets may be exposed in output."
+  warn "Disable tracing before running this script with credentials."
 fi
 
-echo "Using: $COMPOSE"
+# =============================================================================
+# Main dispatch
+# =============================================================================
 
-echo ""
-echo "--- Step 7: Starting the client ---"
-
-cd "$SCRIPT_DIR"
-$COMPOSE up -d
-
-echo ""
-echo "--- Step 8: Checking logs ---"
-echo ""
-echo "Waiting 10 seconds for the client to start..."
-sleep 10
-
-$COMPOSE logs panw-network-client
-
-echo ""
-echo "============================================="
-echo " Setup complete!"
-echo " Files in: $SCRIPT_DIR"
-echo ""
-echo " Config files:"
-echo "   .env.setup   - Registry credentials (script use only)"
-echo "   .env.runtime - Container runtime config"
-echo "   docker-compose.yml"
-echo ""
-echo " Commands:"
-echo "   Follow logs:  $COMPOSE logs -f panw-network-client"
-echo "   Stop:         $COMPOSE down"
-echo "   Restart:      $COMPOSE up -d"
-echo "   Update:       change CHART_VERSION in .env and rerun this script"
-echo "============================================="
+case "$MODE" in
+  init)     do_init ;;
+  status)   do_status ;;
+  validate) do_validate ;;
+  diagnose) do_diagnose ;;
+  install)  do_install ;;
+esac

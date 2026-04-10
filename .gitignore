@@ -1,5 +1,8 @@
 .env
+.env.*
+!.env.example
 docker-compose.yml
 *.tar
 panw-client.tar
+deploy.log
 .claude
