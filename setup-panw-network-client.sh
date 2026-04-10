@@ -1006,7 +1006,27 @@ EOF
     success "Container is running."
     echo ""
 
-    # Show recent logs
+    # Wait for connection and check logs
+    info "Waiting for channel connection (up to 30s)..."
+    local wait_attempts=0
+    local connected=false
+    while [ $wait_attempts -lt 15 ]; do
+      if $COMPOSE logs --tail=50 panw-network-client 2>/dev/null | grep -qi "connected to the server"; then
+        connected=true
+        break
+      fi
+      sleep 2
+      wait_attempts=$((wait_attempts + 1))
+    done
+
+    echo ""
+    if [ "$connected" = true ]; then
+      success "Channel is CONNECTED"
+    else
+      warn "Could not confirm connection within 30s. Check logs or run --validate later."
+    fi
+
+    echo ""
     info "Recent logs:"
     $COMPOSE logs --tail=15 panw-network-client 2>/dev/null | sed 's/^/  /'
   fi
