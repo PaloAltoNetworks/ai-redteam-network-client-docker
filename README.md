@@ -110,7 +110,7 @@ Manually, extract it from the OCI URL shown in the portal at Step 4:
 
 ```
 oci://registry.ai-red-teaming.paloaltonetworks.com/pairs-redteam-prd-fckx/red-teaming-onprem/charts/panw-network-client
-                                                   └──────────────────── TENANT_PATH ────────────────────┘
+                                                  └────────────── TENANT_PATH ──────────────┘
 ```
 
 ---
