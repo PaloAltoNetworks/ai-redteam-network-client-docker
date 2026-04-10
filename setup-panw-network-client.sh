@@ -112,7 +112,7 @@ while [ $# -gt 0 ]; do
     --validate)  MODE="validate"; shift ;;
     --diagnose)  MODE="diagnose"; shift ;;
     --help|-h)   usage ;;
-    *)           error "Unknown option: $1"; usage ;;
+    *)           error "Unknown option: $1"; exit 1 ;;
   esac
 done
 
@@ -847,7 +847,17 @@ do_install() {
   info "Image digest: $IMAGE_DIGEST"
   log_deploy "image_resolved" "image=$FULL_IMAGE digest=$IMAGE_DIGEST chart_version=$CHART_VERSION"
 
-  # Parse config defaults
+  # Parse config defaults from chart, but let .env values take precedence.
+  # Save .env overrides before local declarations shadow them.
+  local env_LOG_LEVEL="${LOG_LEVEL:-}"
+  local env_PRETTY_LOGS="${PRETTY_LOGS:-}"
+  local env_HANDSHAKE_TIMEOUT="${HANDSHAKE_TIMEOUT:-}"
+  local env_PROXY_TIMEOUT="${PROXY_TIMEOUT:-}"
+  local env_CONNECTION_RETRY_INTERVAL="${CONNECTION_RETRY_INTERVAL:-}"
+  local env_POOL_SIZE="${POOL_SIZE:-}"
+  local env_RE_AUTH_INTERVAL="${RE_AUTH_INTERVAL:-}"
+  local env_DISABLE_SSL_VERIFICATION="${DISABLE_SSL_VERIFICATION:-}"
+
   parse_value() {
     local raw
     raw=$(grep "$1:" "$VALUES_FILE" | head -1 | sed "s/.*$1:[[:space:]]*//" | sed "s/[\"']//g" | xargs)
@@ -864,14 +874,15 @@ do_install() {
   RE_AUTH_INTERVAL=$(parse_value "reAuthInterval")
   DISABLE_SSL_VERIFICATION=$(parse_value "disableSSLVerification")
 
-  LOG_LEVEL="${LOG_LEVEL:-INFO}"
-  PRETTY_LOGS="${PRETTY_LOGS:-false}"
-  HANDSHAKE_TIMEOUT="${HANDSHAKE_TIMEOUT:-10s}"
-  PROXY_TIMEOUT="${PROXY_TIMEOUT:-100s}"
-  CONNECTION_RETRY_INTERVAL="${CONNECTION_RETRY_INTERVAL:-5s}"
-  POOL_SIZE="${POOL_SIZE:-2048}"
-  RE_AUTH_INTERVAL="${RE_AUTH_INTERVAL:-5m}"
-  DISABLE_SSL_VERIFICATION="${DISABLE_SSL_VERIFICATION:-false}"
+  # Precedence: .env override > chart value > hardcoded default
+  LOG_LEVEL="${env_LOG_LEVEL:-${LOG_LEVEL:-INFO}}"
+  PRETTY_LOGS="${env_PRETTY_LOGS:-${PRETTY_LOGS:-false}}"
+  HANDSHAKE_TIMEOUT="${env_HANDSHAKE_TIMEOUT:-${HANDSHAKE_TIMEOUT:-10s}}"
+  PROXY_TIMEOUT="${env_PROXY_TIMEOUT:-${PROXY_TIMEOUT:-100s}}"
+  CONNECTION_RETRY_INTERVAL="${env_CONNECTION_RETRY_INTERVAL:-${CONNECTION_RETRY_INTERVAL:-5s}}"
+  POOL_SIZE="${env_POOL_SIZE:-${POOL_SIZE:-2048}}"
+  RE_AUTH_INTERVAL="${env_RE_AUTH_INTERVAL:-${RE_AUTH_INTERVAL:-5m}}"
+  DISABLE_SSL_VERIFICATION="${env_DISABLE_SSL_VERIFICATION:-${DISABLE_SSL_VERIFICATION:-false}}"
 
   if [ "${DISABLE_SSL_VERIFICATION}" = "true" ]; then
     echo ""
