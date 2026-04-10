@@ -910,15 +910,22 @@ do_install() {
   step "4" "Pulling container image"
 
   # Skip if already running the same image
-  local RUNNING_DIGEST
-  RUNNING_DIGEST=$(docker inspect --format='{{.Image}}' "$(docker ps -qf name=panw-network-client 2>/dev/null | head -1)" 2>/dev/null || echo "")
-  if [ -n "$RUNNING_DIGEST" ] && [ "$IMAGE_DIGEST" != "unknown" ]; then
-    # Docker stores digests as sha256:..., crane returns sha256:...
-    local RUNNING_REPO_DIGEST
-    RUNNING_REPO_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$(docker images -q "$FULL_IMAGE" 2>/dev/null | head -1)" 2>/dev/null || echo "")
-    if echo "$RUNNING_REPO_DIGEST" | grep -q "$IMAGE_DIGEST"; then
-      info "Already running latest image ($IMAGE_DIGEST). Nothing to do."
-      exit 0
+  if [ "$IMAGE_DIGEST" != "unknown" ]; then
+    local COMPOSE
+    COMPOSE=$(detect_compose)
+    local RUNNING_CID
+    RUNNING_CID=$($COMPOSE ps -q panw-network-client 2>/dev/null | head -1)
+    if [ -n "$RUNNING_CID" ]; then
+      local RUNNING_IMAGE
+      RUNNING_IMAGE=$(docker inspect --format='{{.Config.Image}}' "$RUNNING_CID" 2>/dev/null || echo "")
+      if [ -n "$RUNNING_IMAGE" ]; then
+        local LOCAL_DIGEST
+        LOCAL_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$RUNNING_IMAGE" 2>/dev/null || echo "")
+        if echo "$LOCAL_DIGEST" | grep -q "$IMAGE_DIGEST"; then
+          info "Already running latest image ($IMAGE_DIGEST). Nothing to do."
+          exit 0
+        fi
+      fi
     fi
   fi
 
