@@ -91,7 +91,7 @@ Pattern-matches container logs against known error signatures:
 
 ## Credentials
 
-Gather these from the [AI Red Teaming portal](https://ai-red-teaming.paloaltonetworks.com) before running the script, or use `--init` for guided collection:
+Gather these from the [AI Red Teaming portal](https://stratacloudmanager.paloaltonetworks.com/ai-security/red-teaming/network-channels) before running the script, or use `--init` for guided collection:
 
 | Credential | Portal Location | Used For |
 |---|---|---|
