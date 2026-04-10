@@ -1005,9 +1005,7 @@ EOF
   local attempts=0
   local max_attempts=15
   while [ $attempts -lt $max_attempts ]; do
-    local cid
-    cid=$(docker ps -qf name=panw-network-client 2>/dev/null || true)
-    if [ -n "$cid" ] && docker inspect --format='{{.State.Running}}' "$cid" 2>/dev/null | grep -q "true"; then
+    if $COMPOSE ps --format json 2>/dev/null | grep -q '"running"'; then
       break
     fi
     sleep 2
