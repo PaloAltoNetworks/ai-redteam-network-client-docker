@@ -17,7 +17,7 @@ chmod +x setup-panw-network-client.sh
 ./setup-panw-network-client.sh --validate
 ```
 
-The setup only asks for **3 things**: your region, Client ID, and Client Secret. Everything else (channel, registry credentials, image version) is auto-discovered from the API.
+The setup asks only for your **region, Client ID, and Client Secret** — then lets you pick a channel from the API. Everything else (TSG ID, registry credentials, image version) is auto-discovered.
 
 Look for **"Connected to the server"** in the logs, or click **Validate Channel** in the portal.
 
@@ -45,18 +45,19 @@ The setup script:
 | `./setup-panw-network-client.sh --status` | Check current deployment state |
 | `./setup-panw-network-client.sh --validate` | Verify the channel is connected |
 | `./setup-panw-network-client.sh --diagnose` | Analyze container logs for common issues |
+| `./setup-panw-network-client.sh --quiet` | Suppress info/success output (errors and warnings only) — for CI/automation |
 
 ### Interactive Setup (`--init`)
 
-The `--init` mode guides you through creating the `.env` file with just **3 inputs**:
+The `--init` mode guides you through creating the `.env` file. You provide:
 
 1. **Region** — Americas (US), Europe (NL), or Asia Pacific (SG)
 2. **Client ID** — from the service account in the portal
 3. **Client Secret** — from the service account in the portal
+4. **Channel** — pick from the list returned by the API (or create a new one on the fly)
 
-Everything else is auto-discovered:
-- **TSG ID** — extracted from the Client ID format
-- **Channel** — listed from the API, you pick one interactively (or create new)
+Auto-discovered, no input needed:
+- **TSG ID** — extracted from the Client ID (you'll be prompted if the format is non-standard)
 - **Registry credentials** — fetched from the management API
 - **Image + version** — resolved from the stats API
 
@@ -79,7 +80,7 @@ Pattern-matches container logs against known error signatures:
 
 | Requirement | Details |
 |---|---|
-| **Docker** | 20.10+ with Docker Compose (v1 or v2) |
+| **Docker** | 20.10+ recommended, with Docker Compose (v1 or v2) |
 | **OS** | Linux (x86_64, aarch64) or macOS (Intel, Apple Silicon) |
 | **Tools** | `curl`, `jq` |
 | **Network** | Outbound HTTPS to `*.paloaltonetworks.com` |
@@ -186,6 +187,14 @@ docker compose down                           # Stop
 docker compose up -d                          # Start
 docker compose restart                        # Restart after config changes
 docker stats panw-network-client              # Resource usage
+```
+
+### Health Monitoring
+
+The container includes a Docker healthcheck. Inspect it with:
+
+```bash
+docker inspect --format='{{.State.Health.Status}}' $(docker ps -qf name=panw-network-client)
 ```
 
 ### Updating
