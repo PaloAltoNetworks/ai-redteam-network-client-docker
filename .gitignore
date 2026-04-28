@@ -8,3 +8,4 @@ panw-client.tar
 deploy.log
 .image-digest
 .claude*
+*.csv

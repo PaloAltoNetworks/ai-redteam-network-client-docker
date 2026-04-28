@@ -2,8 +2,6 @@
 
 Deploy the Palo Alto Networks AI Red Teaming network client using **Docker Compose** on a standard server (Linux or macOS) — no Kubernetes or Helm required.
 
-[![Demo](demo.svg)](#)
-
 ## Quick Start
 
 ```bash
@@ -11,18 +9,15 @@ Deploy the Palo Alto Networks AI Red Teaming network client using **Docker Compo
 git clone https://github.com/PaloAltoNetworks/ai-redteam-network-client-docker.git
 cd ai-redteam-network-client-docker
 
-# 2. Interactive setup (creates .env from portal values)
+# 2. Run (auto-launches setup if no .env exists)
 chmod +x setup-panw-network-client.sh
-./setup-panw-network-client.sh --init
-
-# 3. Deploy
 ./setup-panw-network-client.sh
 
-# 4. Verify the channel is connected
+# 3. Verify the channel is connected
 ./setup-panw-network-client.sh --validate
 ```
 
-The script automatically installs [crane](https://github.com/google/go-containerregistry) (with checksum verification), pulls the container image, generates a hardened `docker-compose.yml`, and starts the client.
+The setup only asks for **3 things**: your region, Client ID, and Client Secret. Everything else (channel, registry credentials, image version) is auto-discovered from the API.
 
 Look for **"Connected to the server"** in the logs, or click **Validate Channel** in the portal.
 
@@ -34,9 +29,9 @@ The Palo Alto AI Red Teaming portal provides Kubernetes/Helm deployment instruct
 
 The setup script:
 
-1. **Replaces Helm with crane** — pulls the Helm chart as an OCI artifact and extracts `values.yaml` to discover the container image and default configuration.
-2. **Replaces `docker pull` with `crane pull`** — the Palo Alto registry uses token-based auth that can expire mid-download with standard `docker pull`. Crane downloads the image as a tarball in one authenticated request, then `docker load` imports it.
-3. **Replaces Kubernetes Secrets/ConfigMaps with `.env` files** — splits credentials into `.env.setup` (registry-only, never passed to the container) and `.env.runtime` (container config), following least-privilege principles.
+1. **Authenticates via OAuth2** — validates your service account and auto-discovers channels, registry credentials, and the container image from the API.
+2. **Pulls the container image via Docker** — no external tools required beyond Docker itself.
+3. **Generates a hardened `docker-compose.yml`** — with read-only filesystem, dropped capabilities, memory/CPU limits, and health checks.
 
 ---
 
@@ -44,8 +39,8 @@ The setup script:
 
 | Command | Description |
 |---|---|
-| `./setup-panw-network-client.sh --init` | Interactive guided setup — creates `.env` from portal values |
-| `./setup-panw-network-client.sh` | Full install (pull image, generate config, start container) |
+| `./setup-panw-network-client.sh` | Full install (auto-runs `--init` if no `.env` exists) |
+| `./setup-panw-network-client.sh --init` | Interactive guided setup — creates `.env` |
 | `./setup-panw-network-client.sh --dry-run` | Show what would happen without making changes |
 | `./setup-panw-network-client.sh --status` | Check current deployment state |
 | `./setup-panw-network-client.sh --validate` | Verify the channel is connected |
@@ -53,12 +48,17 @@ The setup script:
 
 ### Interactive Setup (`--init`)
 
-The `--init` mode guides you through creating the `.env` file step by step:
+The `--init` mode guides you through creating the `.env` file with just **3 inputs**:
 
-1. Prompts for each credential with clear labels matching the portal UI
-2. Validates registry credentials in real-time (if crane is available)
-3. Auto-extracts `TENANT_PATH` from the full OCI URL — no manual parsing needed
-4. Writes a secure `.env` file (mode 600)
+1. **Region** — Americas (US), Europe (NL), or Asia Pacific (SG)
+2. **Client ID** — from the service account in the portal
+3. **Client Secret** — from the service account in the portal
+
+Everything else is auto-discovered:
+- **TSG ID** — extracted from the Client ID format
+- **Channel** — listed from the API, you pick one interactively (or create new)
+- **Registry credentials** — fetched from the management API
+- **Image + version** — resolved from the stats API
 
 ### Dry Run (`--dry-run`)
 
@@ -81,73 +81,45 @@ Pattern-matches container logs against known error signatures:
 |---|---|
 | **Docker** | 20.10+ with Docker Compose (v1 or v2) |
 | **OS** | Linux (x86_64, aarch64) or macOS (Intel, Apple Silicon) |
-| **Tools** | `curl`, `tar` |
-| **Disk** | 2 GB free (for temporary image tarballs) |
-| **Network** | Outbound HTTPS to `*.paloaltonetworks.com` and `github.com` |
-
-**Note:** `sudo` is no longer required. Crane installs to `~/.local/bin` by default. Override with `CRANE_INSTALL_DIR=/custom/path`.
+| **Tools** | `curl` |
+| **Network** | Outbound HTTPS to `*.paloaltonetworks.com` |
 
 ---
 
 ## Credentials
 
-Gather these from the [AI Red Teaming portal](https://stratacloudmanager.paloaltonetworks.com/ai-security/red-teaming/network-channels) before running the script, or use `--init` for guided collection:
-
-| Credential | Portal Location | Used For |
-|---|---|---|
-| Registry Username | Channel Setup > Step 2 | Pulling images |
-| Registry Password | Channel Setup > Step 2 | Pulling images |
-| Service Account Client ID | Channel Setup > Step 3 | Container authentication |
-| Service Account Client Secret | Channel Setup > Step 3 | Container authentication |
-| Channel ID | Channel Setup > Step 4 | Container configuration |
-| Tenant Path | Channel Setup > Step 4 (in OCI URL) | Registry path |
-
-### Finding Your Tenant Path
-
-With `--init`, paste the full OCI URL and the tenant path is extracted automatically.
-
-Manually, extract it from the OCI URL shown in the portal at Step 4:
-
-```
-oci://registry.ai-red-teaming.paloaltonetworks.com/pairs-redteam-prd-fckx/red-teaming-onprem/charts/panw-network-client
-                                                  └────────────── TENANT_PATH ──────────────┘
-```
+You only need a [service account](https://docs.paloaltonetworks.com/common-services/identity-and-access-access-management/manage-identity-and-access/add-service-accounts) (Client ID + Client Secret). No need to create a channel first — the script handles that.
 
 ---
 
 ## Configuration
 
-### `.env` (input)
-
-Create this file before running the script (or use `--init`):
+### `.env` (generated by `--init`)
 
 ```env
-REGISTRY_USERNAME="<from portal step 2>"
-REGISTRY_PASSWORD="<from portal step 2>"
-CLIENT_ID="<from portal step 3>"
-CLIENT_SECRET="<from portal step 3>"
-CHANNEL_ID="<from portal step 4>"
-TENANT_PATH="<e.g. pairs-redteam-prd-fckx/red-teaming-onprem>"
-CHART_VERSION="latest"
+CLIENT_ID="name@123456.iam.panserviceaccount.com"
+CLIENT_SECRET="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+TSG_ID="123456"
+CHANNEL_ID="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+REGION="us"
+REGISTRY_TOKEN="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+REGISTRY_TOKEN_EXPIRY="2027-..."
 ```
-
-Set `CHART_VERSION` to `latest` for auto-detection or pin a specific version (e.g. `1.0.4`). **Pinning is recommended for production.**
 
 ### Generated Files
 
-The script produces three files:
+The script produces:
 
 | File | Contents | Passed to Container |
 |---|---|---|
-| `.env.setup` | Registry credentials | No |
 | `.env.runtime` | Client ID, secret, channel ID, tunables | Yes |
 | `docker-compose.yml` | Hardened container configuration | — |
 
-Both `.env.*` files are created with `chmod 600` (owner-only access). Existing files are backed up to `.bak` before overwriting.
+The `.env.runtime` file is created with `chmod 600` (owner-only access). Existing files are backed up to `.bak` before overwriting.
 
 ### Runtime Tunables
 
-Adjust in `.env.runtime` and restart (`docker compose restart`):
+Override in `.env` and re-run the script (or edit `.env.runtime` and restart):
 
 | Variable | Default | Description |
 |---|---|---|
@@ -157,6 +129,16 @@ Adjust in `.env.runtime` and restart (`docker compose restart`):
 | `CONNECTION_RETRY_INTERVAL` | `5s` | Retry interval for failed connections |
 | `RE_AUTH_INTERVAL` | `5m` | Re-authentication frequency |
 | `DISABLE_SSL_VERIFICATION` | `false` | **Must be `false` in production** |
+
+### Advanced Overrides
+
+Set in `.env` only if you need to override API-discovered values:
+
+| Variable | Purpose |
+|---|---|
+| `IMAGE_PATH` | Override API-discovered image (format: `path/image:tag`) |
+| `REGISTRY_HOST` | Override region-based registry hostname |
+| `TSG_ID` | Explicit TSG ID (if auto-extraction from CLIENT_ID fails) |
 
 ---
 
@@ -175,19 +157,18 @@ healthcheck: ...                       # Automatic health monitoring
 ```
 
 Additional protections:
-- Registry credentials are **never** passed to the container (split `.env` files)
-- Credentials are piped via stdin to `crane auth login` (not visible in `ps`)
-- `.env.*` files are created with `600` permissions
-- `.gitignore` prevents committing secrets (`.env`, `.env.*`, `.env.setup`, `.env.runtime`)
-- Shell tracing detection warns if `set -x` could leak secrets
-- Crane binary downloaded with pinned version and SHA256 checksum verification
+- API credentials use `--header @file` pattern (never visible in `ps` or process args)
+- All credential functions disable shell tracing (`set +x`)
+- `.env` and `.env.runtime` created with `600` permissions
+- `.gitignore` prevents committing secrets
+- Temp files use `mktemp` + `chmod 600` + explicit cleanup
 - Image digest logged to `deploy.log` for supply chain auditability
-- Image tarball stored in temp directory (cleaned up on exit, even on failure)
-- Existing config files backed up before overwriting
+- Registry token is long-lived (~1 year) but auto-refreshed when expired
+- HTTPS-only enforcement on all API calls (`--proto =https`)
 
 ### Deployment Audit Log
 
-Every install and image pull is logged to `deploy.log` with timestamps, image digests, and chart versions. This file never contains secrets and supports compliance requirements (SOC 2, ISO 27001).
+Every install and image pull is logged to `deploy.log` with timestamps and image digests. This file never contains secrets and supports compliance requirements (SOC 2, ISO 27001).
 
 ---
 
@@ -207,40 +188,28 @@ docker compose restart                        # Restart after config changes
 docker stats panw-network-client              # Resource usage
 ```
 
-### Health Monitoring
-
-The container includes a Docker healthcheck that verifies the client process is running. Check health status:
-
-```bash
-docker inspect --format='{{.State.Health.Status}}' $(docker ps -qf name=panw-network-client)
-```
-
 ### Updating
 
-Change `CHART_VERSION` in `.env` (or keep `latest`) and re-run the script:
+Re-run the script — it auto-detects the latest image version from the API:
 
 ```bash
 ./setup-panw-network-client.sh
 ```
 
-List available versions:
-
-```bash
-crane ls registry.ai-red-teaming.paloaltonetworks.com/<TENANT_PATH>/charts/panw-network-client
-```
+If the image hasn't changed and the container is already running, it exits early with "Already running latest image."
 
 ### Credential Rotation
 
 1. Generate new credentials in the portal
-2. Update `.env.runtime` (or update `.env` and re-run the script)
-3. Restart: `docker compose restart`
+2. Re-run `./setup-panw-network-client.sh --init`
+3. Deploy: `./setup-panw-network-client.sh`
 4. Verify: `./setup-panw-network-client.sh --validate`
 5. Revoke old credentials in the portal
 
 ### Backup
 
 ```bash
-tar -czf panw-client-backup-$(date +%Y%m%d).tar.gz .env .env.setup .env.runtime docker-compose.yml deploy.log
+tar -czf panw-client-backup-$(date +%Y%m%d).tar.gz .env .env.runtime docker-compose.yml deploy.log
 ```
 
 ### Uninstall
@@ -248,7 +217,7 @@ tar -czf panw-client-backup-$(date +%Y%m%d).tar.gz .env .env.setup .env.runtime 
 ```bash
 docker compose down                                    # Stop container
 docker rmi $(docker compose config | grep image: | awk '{print $2}')  # Remove image
-rm -f .env.setup .env.runtime docker-compose.yml       # Remove config
+rm -f .env .env.runtime docker-compose.yml             # Remove config
 ```
 
 ---
@@ -257,26 +226,19 @@ rm -f .env.setup .env.runtime docker-compose.yml       # Remove config
 
 Outbound HTTPS (TCP/443) to:
 
-| Endpoint | Pattern | Purpose |
+| Endpoint | When | Purpose |
 |---|---|---|
-| `api.sase.paloaltonetworks.com` | Long-lived | Control plane |
-| `auth.apps.paloaltonetworks.com` | Periodic | Token refresh |
-| `registry.ai-red-teaming.paloaltonetworks.com` | Setup only | Image pull |
-| `github.com` | Setup only | Crane download |
-| Target systems | On-demand | Proxied traffic |
+| `auth.apps.paloaltonetworks.com` | Always | OAuth2 authentication |
+| `api.sase.paloaltonetworks.com` | Always | API (channels, registry credentials, stats) |
+| `registry.ai-red-teaming.paloaltonetworks.com` | Setup/Update | Image pull (US) |
+| `registry-nl.ai-red-teaming.paloaltonetworks.com` | Setup/Update | Image pull (Europe) |
+| `registry-sg.ai-red-teaming.paloaltonetworks.com` | Setup/Update | Image pull (Asia Pacific) |
 
-Test connectivity:
-
-```bash
-curl -sI https://api.sase.paloaltonetworks.com
-curl -sI https://auth.apps.paloaltonetworks.com
-```
-
-Any HTTP response (200, 401, 403) confirms the connection works. Timeouts indicate a network block.
+Only one registry is needed, based on your selected region.
 
 ### Proxy Support
 
-Add to `.env.runtime`:
+Add to `.env`:
 
 ```env
 HTTP_PROXY="http://proxy.example.com:8080"
@@ -292,14 +254,23 @@ Run `./setup-panw-network-client.sh --diagnose` for automated analysis, or check
 
 | Problem | Likely Cause | Fix |
 |---|---|---|
-| `Unsupported architecture` at Step 1 | Unsupported OS/arch | Check `uname -s` / `uname -m` |
-| `unauthorized` at Step 2 | Bad registry credentials | Verify `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` |
-| `Could not list chart versions` | Wrong `TENANT_PATH` | Test: `crane ls <registry>/<TENANT_PATH>/charts/panw-network-client` |
-| `Could not parse image` | Chart format changed | Check `values.yaml` output, contact PA support |
-| Container exits immediately | Bad `CLIENT_ID`/`CLIENT_SECRET` | Check `docker compose logs panw-network-client` |
+| `Authentication failed` | Bad CLIENT_ID/CLIENT_SECRET | Verify credentials in portal |
+| `Could not extract TSG ID` | CLIENT_ID format unexpected | Set `TSG_ID` explicitly in `.env` |
+| `Could not fetch registry credentials` | API endpoint unreachable | Check network, set `REGISTRY_TOKEN` manually |
+| `Could not discover image` | Stats API unavailable | Set `IMAGE_PATH` in `.env` |
+| `Docker login failed` | Bad registry credentials | Re-run `--init` to refresh token |
+| Container exits immediately | Bad credentials or channel | Check `docker compose logs panw-network-client` |
 | Channel stays "Offline" | Network or credential issue | Run `--diagnose` to identify the cause |
 | `docker compose` not found | Compose not installed | Install: `apt install docker-compose-plugin` |
-| Container can't reach targets | Capabilities too restrictive | Add `cap_add: [NET_RAW]` if ICMP is needed |
+
+---
+
+## Backwards Compatibility
+
+If you have an existing `.env` from a previous version (with `TENANT_PATH`, `REGISTRY_HOST`, etc.), the script auto-migrates it:
+- Derives `REGION` from `REGISTRY_HOST`
+- Uses `REGISTRY_USERNAME` as `TSG_ID`
+- Saves old `.env` as `.env.old`
 
 ---
 

@@ -26,21 +26,22 @@ set -euo pipefail
 #
 # Prerequisites:
 #   - Docker (20.10+) with Docker Compose
-#   - curl, tar
-#   - Outbound HTTPS to *.paloaltonetworks.com and github.com
+#   - curl
+#   - Outbound HTTPS to *.paloaltonetworks.com
 # =============================================================================
 
 # --- Constants ---
 
-REGISTRY="registry.ai-red-teaming.paloaltonetworks.com"
+REGISTRY_DEFAULT="registry.ai-red-teaming.paloaltonetworks.com"
+REGISTRY="$REGISTRY_DEFAULT"
+KNOWN_REGISTRIES=(
+  "us|registry.ai-red-teaming.paloaltonetworks.com|Americas (US)"
+  "nl|registry-nl.ai-red-teaming.paloaltonetworks.com|Europe (Netherlands)"
+  "sg|registry-sg.ai-red-teaming.paloaltonetworks.com|Asia Pacific (Singapore)"
+)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
 DEPLOY_LOG="${SCRIPT_DIR}/deploy.log"
-CRANE_VERSION="0.21.3"
-CRANE_SHA256_DARWIN_ARM64="4c00c3a1ecfac44601abb9a4ef0223f491e3eeb4193c9e644540fb1ea6f2275d"
-CRANE_SHA256_DARWIN_X86_64="ee6b02fa1864dca869df0f71838c60048502ab6eed681d795903ecf356471653"
-CRANE_SHA256_LINUX_X86_64="46dbf12d943efa5673ab654186c5d7c1503580544de0df9325537083436fe5d0"
-CRANE_SHA256_LINUX_ARM64="dabcf2aee76ca72da63b5da5137c910a6852ccff13e35628e8f0a9dd8b73f4f3"
 
 # --- Color output (respects NO_COLOR) ---
 
@@ -91,10 +92,6 @@ Options:
 
 Quick Start:
   1. ./setup-panw-network-client.sh --init
-  2. ./setup-panw-network-client.sh
-
-Or manually:
-  1. cp .env.example .env && edit .env
   2. ./setup-panw-network-client.sh
 USAGE
   exit 0
@@ -150,16 +147,477 @@ detect_compose() {
   fi
 }
 
-# --- Extract TENANT_PATH from OCI URL ---
+# =============================================================================
+# API Layer — OAuth2 auth + Network Broker REST API
+# =============================================================================
 
-parse_tenant_path() {
-  local url="$1"
-  # Strip oci:// prefix, registry host, and /charts/panw-network-client suffix
-  url="${url#oci://}"
-  url="${url#https://}"
-  url="${url#${REGISTRY}/}"
-  url="${url%/charts/panw-network-client*}"
-  echo "$url"
+API_BASE="https://api.sase.paloaltonetworks.com/ai-red-teaming/data-plane/network-broker"
+MGMT_API_BASE="https://api.sase.paloaltonetworks.com/ai-red-teaming/mgmt-plane"
+AUTH_ENDPOINT="https://auth.apps.paloaltonetworks.com/oauth2/access_token"
+API_TOKEN=""
+API_TOKEN_EXPIRY=0
+API_AVAILABLE=false
+
+json_extract() {
+  local filter="$1"
+  if command -v jq &>/dev/null; then
+    jq -re "$filter" 2>/dev/null
+  else
+    local key="${filter#.}"
+    grep -o "\"${key}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | sed 's/.*:[[:space:]]*"\(.*\)"/\1/'
+  fi
+}
+
+json_extract_raw() {
+  local filter="$1"
+  if command -v jq &>/dev/null; then
+    jq -re "$filter" 2>/dev/null
+  else
+    local key="${filter#.}"
+    grep -o "\"${key}\"[[:space:]]*:[[:space:]]*[0-9]*" | head -1 | sed 's/.*:[[:space:]]*//'
+  fi
+}
+
+validate_uuid() {
+  [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+}
+
+extract_tsg_id() {
+  local client_id="$1"
+  if [[ "$client_id" =~ @([0-9]+)\.iam\.panserviceaccount\.com$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
+api_authenticate() {
+  { set +x; } 2>/dev/null
+
+  local client_id="${CLIENT_ID:-}"
+  local client_secret="${CLIENT_SECRET:-}"
+  local tsg_id="${TSG_ID:-}"
+
+  if [ -z "$client_id" ] || [ -z "$client_secret" ]; then
+    return 1
+  fi
+
+  local _auth_hdr
+  _auth_hdr=$(mktemp) || return 1
+  chmod 600 "$_auth_hdr"
+
+  local basic_cred
+  basic_cred=$(printf '%s:%s' "$client_id" "$client_secret" | base64 | tr -d '\n')
+  printf 'Authorization: Basic %s\n' "$basic_cred" > "$_auth_hdr"
+
+  local scope_data="grant_type=client_credentials"
+  if [ -n "$tsg_id" ]; then
+    scope_data="${scope_data}&scope=tsg_id:${tsg_id}"
+  fi
+
+  local response
+  response=$(curl --silent --show-error \
+    --proto "=https" \
+    --connect-timeout 10 \
+    --max-time 30 \
+    --header @"$_auth_hdr" \
+    --data "$scope_data" \
+    "$AUTH_ENDPOINT" 2>/dev/null) || { rm -f "$_auth_hdr"; return 1; }
+
+  rm -f "$_auth_hdr"
+
+  local token
+  token=$(printf '%s' "$response" | json_extract '.access_token') || return 1
+  [ -z "$token" ] && return 1
+
+  local expires_in
+  expires_in=$(printf '%s' "$response" | json_extract_raw '.expires_in') || expires_in=899
+
+  API_TOKEN="$token"
+  API_TOKEN_EXPIRY=$(( $(date +%s) + expires_in - 60 ))
+  API_AVAILABLE=true
+  return 0
+}
+
+api_ensure_token() {
+  { set +x; } 2>/dev/null
+  if [ -z "$API_TOKEN" ] || [ "$(date +%s)" -ge "$API_TOKEN_EXPIRY" ]; then
+    api_authenticate || return 1
+  fi
+  return 0
+}
+
+api_call() {
+  { set +x; } 2>/dev/null
+
+  local method="$1"
+  local endpoint="$2"
+  local body="${3:-}"
+
+  case "$endpoint" in
+    https://*) ;;
+    *) endpoint="${API_BASE}${endpoint}" ;;
+  esac
+
+  case "$endpoint" in
+    https://*) ;;
+    *) error "Refusing non-HTTPS API call"; return 1 ;;
+  esac
+
+  api_ensure_token || return 1
+
+  local _call_hdr
+  _call_hdr=$(mktemp) || return 1
+  chmod 600 "$_call_hdr"
+
+  printf 'Authorization: Bearer %s\n' "$API_TOKEN" > "$_call_hdr"
+
+  local curl_args=(
+    --silent --show-error
+    --proto "=https"
+    --connect-timeout 10
+    --max-time 30
+    --header @"$_call_hdr"
+    --header "Content-Type: application/json"
+    --request "$method"
+    --write-out '\n%{http_code}'
+  )
+
+  if [ -n "$body" ]; then
+    curl_args+=(--data "$body")
+  fi
+
+  local attempt=0
+  local max_attempts=3
+  local raw_response http_code response
+
+  while [ $attempt -lt $max_attempts ]; do
+    raw_response=$(curl "${curl_args[@]}" "$endpoint" 2>/dev/null) || {
+      attempt=$((attempt + 1))
+      [ $attempt -lt $max_attempts ] && sleep $((attempt * 2))
+      continue
+    }
+
+    http_code=$(printf '%s' "$raw_response" | tail -1)
+    response=$(printf '%s' "$raw_response" | sed '$d')
+
+    case "$http_code" in
+      2[0-9][0-9])
+        rm -f "$_call_hdr"
+        printf '%s' "$response"
+        return 0
+        ;;
+      401)
+        API_TOKEN=""
+        api_authenticate || { rm -f "$_call_hdr"; return 1; }
+        printf 'Authorization: Bearer %s\n' "$API_TOKEN" > "$_call_hdr"
+        attempt=$((attempt + 1))
+        ;;
+      429)
+        attempt=$((attempt + 1))
+        [ $attempt -lt $max_attempts ] && sleep $((attempt * 3))
+        ;;
+      5[0-9][0-9])
+        attempt=$((attempt + 1))
+        [ $attempt -lt $max_attempts ] && sleep $((attempt * 2))
+        ;;
+      *)
+        rm -f "$_call_hdr"
+        return 1
+        ;;
+    esac
+  done
+  rm -f "$_call_hdr"
+  return 1
+}
+
+api_list_channels() {
+  local status_filter="${1:-}"
+  local query=""
+  if [ -n "$status_filter" ]; then
+    query="?status=${status_filter}"
+  fi
+  api_call "GET" "/v1/channels${query}"
+}
+
+api_create_channel() {
+  local name="$1"
+  local desc="${2:-}"
+  # Escape quotes and backslashes for safe JSON
+  name="${name//\\/\\\\}"
+  name="${name//\"/\\\"}"
+  local body
+  if [ -n "$desc" ]; then
+    desc="${desc//\\/\\\\}"
+    desc="${desc//\"/\\\"}"
+    body=$(printf '{"name":"%s","description":"%s"}' "$name" "$desc")
+  else
+    body=$(printf '{"name":"%s"}' "$name")
+  fi
+  api_call "POST" "/v1/channels" "$body"
+}
+
+api_get_stats() {
+  api_call "GET" "/v1/channels/stats"
+}
+
+api_get_channel() {
+  local channel_id="$1"
+  validate_uuid "$channel_id" || return 1
+  api_call "GET" "/v1/channels/${channel_id}"
+}
+
+api_get_registry_credentials() {
+  { set +x; } 2>/dev/null
+  api_ensure_token || return 1
+
+  local _reg_header_file
+  _reg_header_file=$(mktemp) || return 1
+  chmod 600 "$_reg_header_file"
+
+  printf 'Authorization: Bearer %s\n' "$API_TOKEN" > "$_reg_header_file"
+
+  local raw_response http_code response
+  raw_response=$(curl --silent --show-error \
+    --proto "=https" \
+    --connect-timeout 10 \
+    --max-time 30 \
+    --header @"$_reg_header_file" \
+    --header "Content-Type: application/json" \
+    --request POST \
+    --write-out '\n%{http_code}' \
+    "${MGMT_API_BASE}/v1/registry-credentials" 2>/dev/null) || { rm -f "$_reg_header_file"; return 1; }
+
+  rm -f "$_reg_header_file"
+
+  http_code=$(printf '%s' "$raw_response" | tail -1)
+  response=$(printf '%s' "$raw_response" | sed '$d')
+
+  case "$http_code" in
+    2[0-9][0-9]) printf '%s' "$response"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# --- Channel selection ---
+
+select_channel() {
+  info "Fetching available channels..."
+
+  local channels_json
+  channels_json=$(api_list_channels) || {
+    warn "Could not fetch channels from API."
+    prompt_channel_id
+    return
+  }
+
+  local total
+  if command -v jq &>/dev/null; then
+    total=$(printf '%s' "$channels_json" | jq -r '.data | length' 2>/dev/null) || total=0
+  else
+    total=$(printf '%s' "$channels_json" | grep -o '"uuid"' | wc -l | tr -d ' ')
+  fi
+
+  if [ "$total" -eq 0 ]; then
+    info "No channels found. Let's create one."
+    printf "\n  Channel name: "
+    read -r new_name
+    [ -z "$new_name" ] && die "Channel name cannot be empty."
+    local created
+    created=$(api_create_channel "$new_name") || die "Failed to create channel."
+    CHANNEL_ID=$(printf '%s' "$created" | json_extract '.uuid')
+    CHANNEL_NAME=$(printf '%s' "$created" | json_extract '.name')
+    validate_uuid "$CHANNEL_ID" || die "API returned invalid channel ID."
+    success "Created channel: $CHANNEL_NAME ($CHANNEL_ID)"
+    return
+  fi
+
+  echo ""
+  printf "  ${BOLD}Available channels:${NC}\n"
+  echo ""
+
+  local idx=1
+  local selectable_ids=()
+  local selectable_names=()
+
+  if command -v jq &>/dev/null; then
+    while IFS=$'\t' read -r uuid name status last_online; do
+      if [ "$status" = "ONLINE" ]; then
+        printf "     %s  %-30s ${GREEN}ONLINE${NC}  (in use)\n" "-" "$name"
+      else
+        printf "  [${BOLD}%d${NC}] %-30s %s\n" "$idx" "$name" "$status"
+        selectable_ids+=("$uuid")
+        selectable_names+=("$name")
+        idx=$((idx + 1))
+      fi
+    done < <(printf '%s' "$channels_json" | jq -r '.data[] | [.uuid, .name, .status, .last_online_at] | @tsv' 2>/dev/null)
+  else
+    local uuids names statuses
+    uuids=$(printf '%s' "$channels_json" | grep -o '"uuid":"[^"]*"' | sed 's/"uuid":"//;s/"//')
+    names=$(printf '%s' "$channels_json" | grep -o '"name":"[^"]*"' | sed 's/"name":"//;s/"//')
+    statuses=$(printf '%s' "$channels_json" | grep -o '"status":"[^"]*"' | sed 's/"status":"//;s/"//')
+
+    local i=1
+    while IFS= read -r uuid && IFS= read -r name <&3 && IFS= read -r status <&4; do
+      if [ "$status" = "ONLINE" ]; then
+        printf "     %s  %-30s ONLINE  (in use)\n" "-" "$name"
+      else
+        printf "  [%d] %-30s %s\n" "$idx" "$name" "$status"
+        selectable_ids+=("$uuid")
+        selectable_names+=("$name")
+        idx=$((idx + 1))
+      fi
+      i=$((i + 1))
+    done <<< "$uuids" 3<<< "$names" 4<<< "$statuses"
+  fi
+
+  local create_idx=$idx
+  printf "  [${BOLD}%d${NC}] Create a new channel\n" "$create_idx"
+  local manual_idx=$((create_idx + 1))
+  printf "  [${BOLD}%d${NC}] Enter channel ID manually\n" "$manual_idx"
+  echo ""
+
+  local choice
+  while true; do
+    printf "  Select [1-%d]: " "$manual_idx"
+    read -r choice
+
+    if [ "$choice" = "$create_idx" ]; then
+      printf "\n  Channel name: "
+      read -r new_name
+      [ -z "$new_name" ] && { warn "Name cannot be empty."; continue; }
+      local created
+      created=$(api_create_channel "$new_name") || { warn "Failed to create channel. Try again."; continue; }
+      CHANNEL_ID=$(printf '%s' "$created" | json_extract '.uuid')
+      CHANNEL_NAME=$(printf '%s' "$created" | json_extract '.name')
+      validate_uuid "$CHANNEL_ID" || die "API returned invalid channel ID."
+      success "Created channel: $CHANNEL_NAME ($CHANNEL_ID)"
+      return
+    elif [ "$choice" = "$manual_idx" ]; then
+      prompt_channel_id
+      return
+    elif [ "$choice" -ge 1 ] 2>/dev/null && [ "$choice" -lt "$create_idx" ] 2>/dev/null; then
+      local sel_idx=$((choice - 1))
+      CHANNEL_ID="${selectable_ids[$sel_idx]}"
+      CHANNEL_NAME="${selectable_names[$sel_idx]}"
+      validate_uuid "$CHANNEL_ID" || die "Invalid channel ID from selection."
+      success "Selected channel: $CHANNEL_NAME ($CHANNEL_ID)"
+      return
+    else
+      warn "Invalid selection. Enter a number between 1 and $manual_idx."
+    fi
+  done
+}
+
+prompt_channel_id() {
+  echo ""
+  printf "  Channel ID: "
+  read -r CHANNEL_ID
+  [ -z "$CHANNEL_ID" ] && die "Channel ID cannot be empty."
+  validate_uuid "$CHANNEL_ID" || die "Invalid channel ID format (expected UUID)."
+  CHANNEL_NAME=""
+}
+
+# --- Region / Registry ---
+
+resolve_registry() {
+  if [ -n "${REGISTRY_HOST:-}" ]; then
+    REGISTRY="$REGISTRY_HOST"
+    return
+  fi
+  case "${REGION:-us}" in
+    us) REGISTRY="registry.ai-red-teaming.paloaltonetworks.com" ;;
+    nl) REGISTRY="registry-nl.ai-red-teaming.paloaltonetworks.com" ;;
+    sg) REGISTRY="registry-sg.ai-red-teaming.paloaltonetworks.com" ;;
+    *)  REGISTRY="$REGISTRY_DEFAULT" ;;
+  esac
+}
+
+select_region() {
+  echo ""
+  printf "  ${BOLD}Select your region:${NC}\n"
+  echo ""
+
+  local idx=1
+  for entry in "${KNOWN_REGISTRIES[@]}"; do
+    local code="${entry%%|*}"
+    local rest="${entry#*|}"
+    local reg="${rest%%|*}"
+    local location="${rest##*|}"
+    printf "  [${BOLD}%d${NC}] %-50s %s\n" "$idx" "$location" "$reg"
+    idx=$((idx + 1))
+  done
+  echo ""
+
+  local choice
+  while true; do
+    printf "  Select region [1-3]: "
+    read -r choice
+    case "$choice" in
+      1) REGION="us"; break ;;
+      2) REGION="nl"; break ;;
+      3) REGION="sg"; break ;;
+      *) warn "Invalid selection. Enter 1, 2, or 3." ;;
+    esac
+  done
+
+  resolve_registry
+  success "Region: ${REGION} ($REGISTRY)"
+}
+
+# --- Image discovery ---
+
+discover_image_from_api() {
+  if [ -n "${IMAGE_PATH:-}" ]; then
+    info "Using IMAGE_PATH override from .env"
+    return 0
+  fi
+
+  local stats
+  stats=$(api_get_stats 2>/dev/null) || {
+    warn "Could not fetch image info from API."
+    return 1
+  }
+
+  local docker_image
+  docker_image=$(printf '%s' "$stats" | json_extract '.docker_image') || {
+    warn "API did not return docker_image."
+    return 1
+  }
+
+  if [[ ! "$docker_image" =~ : ]]; then
+    warn "API returned image without version tag: $docker_image"
+    return 1
+  fi
+
+  IMAGE_PATH="$docker_image"
+  info "Image discovered from API: $IMAGE_PATH"
+  return 0
+}
+
+# --- Backwards compatibility ---
+
+migrate_env_if_needed() {
+  if [ -n "${TENANT_PATH:-}" ] && [ -z "${REGION:-}" ]; then
+    warn "Detected old .env format. Auto-migrating..."
+    cp "$ENV_FILE" "${ENV_FILE}.old"
+
+    case "${REGISTRY_HOST:-}" in
+      *-nl.*) REGION="nl" ;;
+      *-sg.*) REGION="sg" ;;
+      *)      REGION="us" ;;
+    esac
+
+    if [ -z "${TSG_ID:-}" ] && [ -n "${REGISTRY_USERNAME:-}" ]; then
+      TSG_ID="$REGISTRY_USERNAME"
+    fi
+
+    if [ -z "${TSG_ID:-}" ] && [ -n "${CLIENT_ID:-}" ]; then
+      TSG_ID=$(extract_tsg_id "$CLIENT_ID" 2>/dev/null) || true
+    fi
+
+    success "Migrated: REGION=$REGION, TSG_ID=${TSG_ID:-<unset>}. Old .env saved to .env.old"
+  fi
 }
 
 # =============================================================================
@@ -173,7 +631,7 @@ do_init() {
   printf "${BOLD}=============================================${NC}\n"
   echo ""
   info "This will guide you through creating your .env file."
-  info "Have the AI Red Teaming portal open to Channel Setup."
+  info "You only need your service account credentials from the portal."
   echo ""
 
   if [ -f "$ENV_FILE" ]; then
@@ -186,30 +644,13 @@ do_init() {
     fi
   fi
 
-  # Step 2: Registry credentials
-  printf "\n${BOLD}Portal Step 2: Docker Registry Credentials${NC}\n"
-  info "Find the username and password in the 'kubectl create secret' command."
-  echo ""
-  printf "  Registry Username: "
-  read -r REG_USER
-  printf "  Registry Password: "
-  read -rs REG_PASS
-  echo ""
+  # Step 1: Region selection
+  printf "\n${BOLD}Step 1: Region${NC}\n"
+  info "Select the region closest to your deployment."
+  select_region
 
-  # Validate registry credentials immediately
-  info "Validating registry credentials..."
-  if command -v crane &>/dev/null; then
-    if printf '%s\n' "$REG_PASS" | crane auth login "$REGISTRY" -u "$REG_USER" --password-stdin 2>/dev/null; then
-      success "Registry credentials valid."
-    else
-      warn "Could not validate credentials (may still work). Continuing..."
-    fi
-  else
-    info "Skipping validation (crane not yet installed). Will verify during setup."
-  fi
-
-  # Step 3: Service account
-  printf "\n${BOLD}Portal Step 3: Service Account${NC}\n"
+  # Step 2: Service account credentials
+  printf "\n${BOLD}Step 2: Service Account Credentials${NC}\n"
   info "Create a service account in the portal and copy the Client ID and Secret."
   echo ""
   printf "  Client ID: "
@@ -218,54 +659,78 @@ do_init() {
   read -rs SA_CLIENT_SECRET
   echo ""
 
-  # Step 4: Channel ID and tenant path
-  printf "\n${BOLD}Portal Step 4: Channel Configuration${NC}\n"
-  echo ""
-  printf "  Channel ID: "
-  read -r CH_ID
+  [ -z "$SA_CLIENT_ID" ] && die "Client ID cannot be empty."
+  [ -z "$SA_CLIENT_SECRET" ] && die "Client Secret cannot be empty."
 
-  echo ""
-  info "The Tenant Path can be extracted from the helm install command in Step 4."
-  info "You can paste the FULL OCI URL or just the tenant path."
-  info "Example OCI URL: oci://registry.ai-red-teaming.paloaltonetworks.com/pairs-redteam-prd-fckx/red-teaming-onprem/charts/panw-network-client"
-  info "Example tenant path: pairs-redteam-prd-fckx/red-teaming-onprem"
-  echo ""
-  printf "  OCI URL or Tenant Path: "
-  read -r TENANT_INPUT
+  # Extract TSG_ID from CLIENT_ID
+  local SA_TSG_ID=""
+  SA_TSG_ID=$(extract_tsg_id "$SA_CLIENT_ID") || {
+    warn "Could not extract TSG ID from Client ID format."
+    info "Expected: name@<tsg_id>.iam.panserviceaccount.com"
+    printf "  Enter TSG ID manually (or leave blank): "
+    read -r SA_TSG_ID
+  }
 
-  # Auto-detect and parse tenant path from full URL
-  if [[ "$TENANT_INPUT" == *"$REGISTRY"* ]] || [[ "$TENANT_INPUT" == oci://* ]]; then
-    TENANT=$(parse_tenant_path "$TENANT_INPUT")
-    info "Auto-extracted tenant path: $TENANT"
-  else
-    TENANT="$TENANT_INPUT"
+  # Validate credentials via API
+  CHANNEL_ID=""
+  CHANNEL_NAME=""
+  CLIENT_ID="$SA_CLIENT_ID"
+  CLIENT_SECRET="$SA_CLIENT_SECRET"
+  TSG_ID="$SA_TSG_ID"
+
+  info "Validating credentials..."
+  if ! api_authenticate; then
+    die "Authentication failed. Check your Client ID and Client Secret."
   fi
+  success "Credentials valid."
 
-  # Chart version
+  # Fetch registry credentials
+  local REG_TOKEN="" REG_EXPIRY=""
+  info "Fetching registry credentials..."
+  local reg_response
+  reg_response=$(api_get_registry_credentials 2>/dev/null) || {
+    warn "Could not fetch registry credentials from API."
+    printf "  Registry Password (from portal): "
+    read -rs REG_TOKEN
+    echo ""
+  }
+  if [ -z "$REG_TOKEN" ] && [ -n "$reg_response" ]; then
+    REG_TOKEN=$(printf '%s' "$reg_response" | json_extract '.token') || REG_TOKEN=""
+    REG_EXPIRY=$(printf '%s' "$reg_response" | json_extract '.expiry') || REG_EXPIRY=""
+  fi
+  [ -z "$REG_TOKEN" ] && die "Could not obtain registry credentials."
+  success "Registry credentials obtained."
+
+  # Step 3: Channel selection
+  printf "\n${BOLD}Step 3: Channel Selection${NC}\n"
+  info "Channels are fetched from the AI Red Teaming platform."
   echo ""
-  printf "  Chart version [latest]: "
-  read -r CHART_VER
-  CHART_VER="${CHART_VER:-latest}"
+  select_channel
 
   # Write .env
   {
     printf '# Generated by setup-panw-network-client.sh --init\n'
     printf '# Date: %s\n\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    printf 'REGISTRY_USERNAME="%s"\n' "$REG_USER"
-    printf 'REGISTRY_PASSWORD="%s"\n' "$REG_PASS"
     printf 'CLIENT_ID="%s"\n' "$SA_CLIENT_ID"
     printf 'CLIENT_SECRET="%s"\n' "$SA_CLIENT_SECRET"
-    printf 'CHANNEL_ID="%s"\n' "$CH_ID"
-    printf 'TENANT_PATH="%s"\n' "$TENANT"
-    printf 'CHART_VERSION="%s"\n' "$CHART_VER"
+    printf 'TSG_ID="%s"\n' "$SA_TSG_ID"
+    printf 'CHANNEL_ID="%s"\n' "$CHANNEL_ID"
+    [ -n "$CHANNEL_NAME" ] && printf 'CHANNEL_NAME="%s"\n' "$CHANNEL_NAME"
+    printf 'REGION="%s"\n' "$REGION"
+    printf 'REGISTRY_TOKEN="%s"\n' "$REG_TOKEN"
+    [ -n "$REG_EXPIRY" ] && printf 'REGISTRY_TOKEN_EXPIRY="%s"\n' "$REG_EXPIRY"
   } > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
 
   echo ""
   success ".env file created at $ENV_FILE (mode 600)"
+  if [ -n "$CHANNEL_NAME" ]; then
+    info "Channel: $CHANNEL_NAME ($CHANNEL_ID)"
+  fi
+  info "Region: $REGION ($REGISTRY)"
   echo ""
   info "Next: run ./setup-panw-network-client.sh to deploy."
-  log_deploy "init" "env_file_created"
+  log_deploy "init" "env_file_created channel=$CHANNEL_ID region=$REGION"
 }
 
 # =============================================================================
@@ -374,6 +839,36 @@ do_validate() {
     info "Recent logs:"
     echo "$logs" | tail -10 | sed 's/^/  /'
   fi
+
+  # API-based channel validation
+  if [ -f "${SCRIPT_DIR}/.env" ]; then
+    load_env "${SCRIPT_DIR}/.env"
+  fi
+  if [ -n "${CLIENT_ID:-}" ] && [ -n "${CLIENT_SECRET:-}" ]; then
+    echo ""
+    info "Checking channel via API..."
+    if api_authenticate 2>/dev/null; then
+      success "OAuth2 authentication: OK"
+      if [ -n "${CHANNEL_ID:-}" ]; then
+        local ch_info
+        ch_info=$(api_get_channel "$CHANNEL_ID" 2>/dev/null) || ch_info=""
+        if [ -n "$ch_info" ]; then
+          local ch_status ch_name
+          ch_status=$(printf '%s' "$ch_info" | json_extract '.status') || ch_status="unknown"
+          ch_name=$(printf '%s' "$ch_info" | json_extract '.name') || ch_name=""
+          if [ "$ch_status" = "ONLINE" ]; then
+            success "Channel '$ch_name' is ONLINE (confirmed by API)"
+          else
+            warn "Channel '$ch_name' status: $ch_status (API)"
+          fi
+        else
+          warn "Could not retrieve channel info from API."
+        fi
+      fi
+    else
+      info "API authentication failed (non-critical). Log-based validation above still applies."
+    fi
+  fi
 }
 
 # =============================================================================
@@ -435,7 +930,7 @@ do_diagnose() {
   # Pattern: Authentication errors
   if echo "$logs" | grep -qi "unauthorized\|401\|authentication failed\|invalid.*client"; then
     error "AUTHENTICATION FAILURE detected"
-    info "  -> Check CLIENT_ID and CLIENT_SECRET in .env.runtime"
+    info "  -> Check CLIENT_ID and CLIENT_SECRET in .env"
     info "  -> Verify the service account has the 'Superuser' role in the portal"
     info "  -> Credentials may have expired — regenerate in the portal"
     issues_found=true
@@ -447,7 +942,7 @@ do_diagnose() {
     error "TLS/CERTIFICATE ERROR detected"
     info "  -> For self-signed or internal CA certs: set DISABLE_SSL_VERIFICATION=\"true\" in .env"
     info "  -> Then re-run: ./setup-panw-network-client.sh"
-    info "  -> If behind a proxy: set HTTP_PROXY, HTTPS_PROXY, NO_PROXY in .env (v1.0.5+)"
+    info "  -> If behind a proxy: set HTTP_PROXY, HTTPS_PROXY, NO_PROXY in .env"
     info "  -> Ensure the host's CA certificates are up to date"
     issues_found=true
     echo ""
@@ -459,7 +954,7 @@ do_diagnose() {
     info "  -> Test: curl -sI https://api.sase.paloaltonetworks.com"
     info "  -> Test: curl -sI https://auth.apps.paloaltonetworks.com"
     info "  -> Check firewall rules for outbound HTTPS (TCP/443)"
-    info "  -> If behind a proxy, set HTTP_PROXY/HTTPS_PROXY in .env.runtime"
+    info "  -> If behind a proxy, set HTTP_PROXY/HTTPS_PROXY in .env"
     issues_found=true
     echo ""
   fi
@@ -467,7 +962,8 @@ do_diagnose() {
   # Pattern: Channel errors
   if echo "$logs" | grep -qi "channel.*not found\|invalid.*channel"; then
     error "CHANNEL CONFIGURATION ERROR detected"
-    info "  -> Verify CHANNEL_ID in .env.runtime matches the portal"
+    info "  -> Verify CHANNEL_ID in .env matches the portal"
+    info "  -> Run --init to re-select a channel"
     issues_found=true
     echo ""
   fi
@@ -492,6 +988,72 @@ do_diagnose() {
     info "Last 20 log lines:"
     echo "$logs" | tail -20 | sed 's/^/  /'
   fi
+
+  # API diagnostics
+  if [ -f "${SCRIPT_DIR}/.env" ]; then
+    load_env "${SCRIPT_DIR}/.env"
+  fi
+  if [ -n "${CLIENT_ID:-}" ] && [ -n "${CLIENT_SECRET:-}" ]; then
+    echo ""
+    printf "${BOLD}--- API Diagnostics ---${NC}\n"
+    echo ""
+
+    # API endpoint reachability
+    local api_code
+    api_code=$(curl -so /dev/null --proto =https --max-time 5 -w "%{http_code}" "$API_BASE/v1/channels/stats" 2>/dev/null || echo "000")
+    if [ "$api_code" != "000" ]; then
+      success "API endpoint reachable (HTTP $api_code)"
+    else
+      error "API endpoint unreachable: $API_BASE"
+      info "  -> Check network connectivity and firewall rules for HTTPS"
+    fi
+
+    # Auth endpoint reachability
+    local auth_code
+    auth_code=$(curl -so /dev/null --proto =https --max-time 5 -w "%{http_code}" "$AUTH_ENDPOINT" 2>/dev/null || echo "000")
+    if [ "$auth_code" != "000" ]; then
+      success "Auth endpoint reachable (HTTP $auth_code)"
+    else
+      error "Auth endpoint unreachable: $AUTH_ENDPOINT"
+    fi
+
+    # OAuth2 authentication test
+    if api_authenticate 2>/dev/null; then
+      success "OAuth2 authentication: OK"
+      [ -n "${TSG_ID:-}" ] && info "TSG ID: ${TSG_ID}"
+
+      # Channel status
+      if [ -n "${CHANNEL_ID:-}" ]; then
+        local ch_info
+        ch_info=$(api_get_channel "$CHANNEL_ID" 2>/dev/null) || ch_info=""
+        if [ -n "$ch_info" ]; then
+          local ch_status ch_name
+          ch_status=$(printf '%s' "$ch_info" | json_extract '.status') || ch_status="unknown"
+          ch_name=$(printf '%s' "$ch_info" | json_extract '.name') || ch_name=""
+          info "Channel: $ch_name | Status: $ch_status | ID: $CHANNEL_ID"
+        else
+          warn "Channel $CHANNEL_ID not found via API"
+        fi
+      fi
+
+      # Image info from stats
+      local stats
+      stats=$(api_get_stats 2>/dev/null) || stats=""
+      if [ -n "$stats" ]; then
+        local api_image api_version
+        api_image=$(printf '%s' "$stats" | json_extract '.docker_image') || api_image=""
+        api_version=$(printf '%s' "$stats" | json_extract '.client_version') || api_version=""
+        [ -n "$api_image" ] && info "Latest image: $api_image"
+        [ -n "$api_version" ] && info "Client version: $api_version"
+      fi
+    else
+      error "OAuth2 authentication FAILED"
+      info "  -> Check CLIENT_ID and CLIENT_SECRET in .env"
+      info "  -> Verify the service account has the 'Superuser' role"
+    fi
+  else
+    info "API diagnostics skipped (CLIENT_ID/CLIENT_SECRET not configured)"
+  fi
 }
 
 # =============================================================================
@@ -512,7 +1074,6 @@ preflight() {
     error "Docker daemon is not running or not accessible."
     failed=true
   else
-    # Check Docker version
     local docker_ver
     docker_ver=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "0.0.0")
     local docker_major
@@ -542,28 +1103,14 @@ preflight() {
     success "curl"
   fi
 
-  # tar
-  if ! command -v tar &>/dev/null; then
-    error "tar is not installed."
-    failed=true
-  else
-    success "tar"
-  fi
-
   # Network connectivity (only for install)
   if [ "$label" = "install" ]; then
-    if curl -sf --max-time 5 "https://api.sase.paloaltonetworks.com" >/dev/null 2>&1 ||
-       curl -sf --max-time 5 -o /dev/null -w "%{http_code}" "https://api.sase.paloaltonetworks.com" 2>/dev/null | grep -q "^[2345]"; then
-      success "Network: api.sase.paloaltonetworks.com reachable"
+    local code
+    code=$(curl -so /dev/null --max-time 5 -w "%{http_code}" "https://api.sase.paloaltonetworks.com" 2>/dev/null || echo "000")
+    if [ "$code" != "000" ]; then
+      success "Network: api.sase.paloaltonetworks.com reachable (HTTP $code)"
     else
-      # Any HTTP response (even 401/403) means network works
-      local code
-      code=$(curl -so /dev/null --max-time 5 -w "%{http_code}" "https://api.sase.paloaltonetworks.com" 2>/dev/null || echo "000")
-      if [ "$code" != "000" ]; then
-        success "Network: api.sase.paloaltonetworks.com reachable (HTTP $code)"
-      else
-        warn "Cannot reach api.sase.paloaltonetworks.com — check network/firewall"
-      fi
+      warn "Cannot reach api.sase.paloaltonetworks.com — check network/firewall"
     fi
   fi
 
@@ -581,113 +1128,6 @@ preflight() {
 }
 
 # =============================================================================
-# Install crane (with checksum verification, no sudo required)
-# =============================================================================
-
-install_crane() {
-  if command -v crane &>/dev/null; then
-    success "crane already installed ($(crane version 2>/dev/null || echo 'unknown version'))"
-    return
-  fi
-
-  local OS ARCH CRANE_ARCH OS_NAME
-  OS="$(uname -s)"
-  ARCH="$(uname -m)"
-
-  case "$OS" in
-    Linux)
-      case "$ARCH" in
-        x86_64)  CRANE_ARCH="x86_64"; OS_NAME="Linux" ;;
-        aarch64) CRANE_ARCH="arm64";   OS_NAME="Linux" ;;
-        *)       error "Unsupported Linux architecture: $ARCH (supported: x86_64, aarch64)"; exit 1 ;;
-      esac
-      ;;
-    Darwin)
-      case "$ARCH" in
-        x86_64) CRANE_ARCH="x86_64"; OS_NAME="Darwin" ;;
-        arm64)  CRANE_ARCH="arm64";   OS_NAME="Darwin" ;;
-        *)      error "Unsupported macOS architecture: $ARCH (supported: x86_64, arm64)"; exit 1 ;;
-      esac
-      ;;
-    *)
-      error "Unsupported OS: $OS (supported: Linux, Darwin)"
-      exit 1
-      ;;
-  esac
-
-  local CRANE_URL="https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_${OS_NAME}_${CRANE_ARCH}.tar.gz"
-  local CRANE_TMP_DIR CRANE_TMP
-  CRANE_TMP_DIR="$(mktemp -d)"
-  CRANE_TMP="${CRANE_TMP_DIR}/crane.tar.gz"
-
-  info "Downloading crane v${CRANE_VERSION} for ${OS_NAME}/${CRANE_ARCH}..."
-
-  if [ "$DRY_RUN" = true ]; then
-    info "[DRY RUN] Would download: $CRANE_URL"
-    info "[DRY RUN] Would install crane to user-local or system path"
-    return
-  fi
-
-  curl -fsSL --proto =https "$CRANE_URL" -o "$CRANE_TMP"
-
-  # Checksum verification
-  local expected_sha
-  case "${OS_NAME}_${CRANE_ARCH}" in
-    Darwin_arm64)  expected_sha="$CRANE_SHA256_DARWIN_ARM64" ;;
-    Darwin_x86_64) expected_sha="$CRANE_SHA256_DARWIN_X86_64" ;;
-    Linux_x86_64)  expected_sha="$CRANE_SHA256_LINUX_X86_64" ;;
-    Linux_arm64)   expected_sha="$CRANE_SHA256_LINUX_ARM64" ;;
-  esac
-
-  local actual_sha
-  if command -v sha256sum &>/dev/null; then
-    actual_sha=$(sha256sum "$CRANE_TMP" | awk '{print $1}')
-  elif command -v shasum &>/dev/null; then
-    actual_sha=$(shasum -a 256 "$CRANE_TMP" | awk '{print $1}')
-  else
-    rm -f "$CRANE_TMP"
-    die "Cannot verify checksum: neither sha256sum nor shasum found. Install coreutils and retry."
-  fi
-
-  if [ "$actual_sha" != "$expected_sha" ]; then
-    warn "Checksum mismatch for crane binary."
-    warn "  Expected: $expected_sha"
-    warn "  Got:      $actual_sha"
-    warn "The downloaded binary may be corrupted or tampered with."
-    warn "Verify manually: https://github.com/google/go-containerregistry/releases/tag/v${CRANE_VERSION}"
-    rm -f "$CRANE_TMP"
-    die "Aborting installation due to checksum mismatch."
-  fi
-
-  # Try user-local install first (no sudo needed)
-  local INSTALL_DIR="${CRANE_INSTALL_DIR:-}"
-  if [ -z "$INSTALL_DIR" ]; then
-    # Try user-local paths first
-    for candidate in "$HOME/.local/bin" "$HOME/bin" "/usr/local/bin"; do
-      if [ -d "$candidate" ] && [ -w "$candidate" ]; then
-        INSTALL_DIR="$candidate"
-        break
-      fi
-    done
-  fi
-
-  if [ -z "$INSTALL_DIR" ]; then
-    # Create ~/.local/bin if nothing is writable
-    INSTALL_DIR="$HOME/.local/bin"
-    mkdir -p "$INSTALL_DIR"
-    if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-      warn "Adding $INSTALL_DIR to PATH for this session."
-      export PATH="$INSTALL_DIR:$PATH"
-      warn "Add to your shell profile: export PATH=\"$INSTALL_DIR:\$PATH\""
-    fi
-  fi
-
-  tar -xzf "$CRANE_TMP" --no-same-owner -C "$INSTALL_DIR" crane
-  rm -rf "$CRANE_TMP_DIR"
-  success "crane v${CRANE_VERSION} installed to $INSTALL_DIR"
-}
-
-# =============================================================================
 # MODE: install (Main setup flow)
 # =============================================================================
 
@@ -700,16 +1140,24 @@ do_install() {
     echo ""
   fi
 
-  # --- Load .env first (proxy settings needed for preflight + crane) ---
+  # --- Load .env (auto-init if missing) ---
   if [ ! -f "$ENV_FILE" ]; then
-    error ".env file not found at $ENV_FILE"
+    info "No .env file found. Starting interactive setup..."
     echo ""
-    info "Quick start:  ./setup-panw-network-client.sh --init"
-    info "Or manually:  cp .env.example .env && edit .env"
-    exit 1
+    do_init
+    [ ! -f "$ENV_FILE" ] && exit 1
+    echo ""
+    info "Continuing with installation..."
+    echo ""
+    load_env "$ENV_FILE"
+  else
+    load_env "$ENV_FILE"
   fi
 
   load_env "$ENV_FILE"
+
+  # Backwards compatibility
+  migrate_env_if_needed
 
   if [ -n "${HTTP_PROXY:-}${HTTPS_PROXY:-}" ]; then
     info "Proxy configured: HTTP_PROXY=${HTTP_PROXY:-} HTTPS_PROXY=${HTTPS_PROXY:-}"
@@ -721,7 +1169,7 @@ do_install() {
 
   # Validate required variables
   local MISSING=0
-  for VAR in REGISTRY_USERNAME REGISTRY_PASSWORD CLIENT_ID CLIENT_SECRET CHANNEL_ID TENANT_PATH; do
+  for VAR in CLIENT_ID CLIENT_SECRET CHANNEL_ID; do
     if [ -z "${!VAR:-}" ]; then
       error "$VAR is not set in .env"
       MISSING=1
@@ -729,233 +1177,134 @@ do_install() {
   done
   [ "$MISSING" -eq 1 ] && exit 1
 
-  CHART_VERSION="${CHART_VERSION:-latest}"
-
-  # Validate TENANT_PATH format
-  TENANT_PATH="${TENANT_PATH#/}"
-  TENANT_PATH="${TENANT_PATH%/}"
-  if [[ ! "$TENANT_PATH" =~ ^[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)*$ ]]; then
-    error "TENANT_PATH contains invalid characters: $TENANT_PATH"
-    info "Expected format: org-id/product (e.g., pairs-redteam-prd-fckx/red-teaming-onprem)"
-    exit 1
+  # Extract TSG_ID if not set
+  if [ -z "${TSG_ID:-}" ]; then
+    TSG_ID=$(extract_tsg_id "$CLIENT_ID") || die "Cannot extract TSG_ID from CLIENT_ID. Set TSG_ID in .env."
   fi
 
-  info "Registry:      $REGISTRY"
-  info "Tenant path:   $TENANT_PATH"
-  info "Chart version: $CHART_VERSION"
+  # Resolve region/registry
+  resolve_registry
+
+  # --- Step 1: API authentication & image discovery ---
+  step "1" "API authentication and image discovery"
+
+  if ! api_authenticate; then
+    die "Authentication failed. Check CLIENT_ID and CLIENT_SECRET in .env"
+  fi
+  success "Authenticated."
+
+  # Refresh registry token if expired or missing
+  local REGISTRY_PASSWORD="${REGISTRY_TOKEN:-}"
+  if [ -z "$REGISTRY_PASSWORD" ]; then
+    info "Fetching registry credentials..."
+    local reg_response
+    reg_response=$(api_get_registry_credentials 2>/dev/null) || die "Could not fetch registry credentials. Set REGISTRY_TOKEN in .env."
+    REGISTRY_PASSWORD=$(printf '%s' "$reg_response" | json_extract '.token') || die "Invalid registry credentials response."
+    success "Registry credentials obtained."
+  fi
+
+  # Discover image
+  if ! discover_image_from_api; then
+    die "Could not discover image. Set IMAGE_PATH in .env (format: path/image:tag)"
+  fi
+
+  local FULL_IMAGE="${REGISTRY}/${IMAGE_PATH}"
+  info "Registry: $REGISTRY"
+  info "Image:    $FULL_IMAGE"
 
   if [ "$DRY_RUN" = true ]; then
     echo ""
     info "[DRY RUN] Would perform the following actions:"
-    info "  1. Install crane v${CRANE_VERSION} (if not present)"
-    info "  2. Login to $REGISTRY"
-    info "  3. Pull chart: ${REGISTRY}/${TENANT_PATH}/charts/panw-network-client:${CHART_VERSION}"
-    info "  4. Extract and pull container image"
-    info "  5. Generate: .env.setup, .env.runtime, docker-compose.yml"
-    info "  6. Start container with docker compose"
+    info "  1. docker login to $REGISTRY"
+    info "  2. docker pull $FULL_IMAGE"
+    info "  3. Generate: .env.runtime, docker-compose.yml"
+    info "  4. Start container with docker compose"
     echo ""
     info "No changes were made."
     exit 0
   fi
 
-  # --- Step 1: Install crane ---
-  step "1" "Installing crane"
-  install_crane
-
-  # --- Step 2: Registry login ---
-  step "2" "Logging into registry"
-  if [ "$QUIET" = true ]; then
-    printf '%s\n' "${REGISTRY_PASSWORD}" | crane auth login "$REGISTRY" -u "${REGISTRY_USERNAME}" --password-stdin >/dev/null 2>&1
-  else
-    printf '%s\n' "${REGISTRY_PASSWORD}" | crane auth login "$REGISTRY" -u "${REGISTRY_USERNAME}" --password-stdin
-  fi
+  # --- Step 2: Docker registry login ---
+  step "2" "Docker registry login"
+  { set +x; } 2>/dev/null
+  printf '%s\n' "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$TSG_ID" --password-stdin >/dev/null 2>&1 || \
+    die "Docker login failed. Check registry credentials."
   success "Registry login successful."
 
-  # --- Resolve chart version ---
-  local CHART_REF="${REGISTRY}/${TENANT_PATH}/charts/panw-network-client"
-
-  if [ "$CHART_VERSION" = "latest" ]; then
-    step "2b" "Resolving latest chart version"
-    local AVAILABLE_TAGS
-    AVAILABLE_TAGS=$(crane ls "$CHART_REF" 2>/dev/null || true)
-    if [ -z "$AVAILABLE_TAGS" ]; then
-      error "Could not list chart versions. Check TENANT_PATH and registry credentials."
-      info "Attempted: $CHART_REF"
-      info "Try: crane ls $CHART_REF"
-      exit 1
-    fi
-    if echo "1.0.0" | sort -V &>/dev/null 2>&1; then
-      CHART_VERSION=$(echo "$AVAILABLE_TAGS" | sort -V | tail -1)
-    else
-      CHART_VERSION=$(echo "$AVAILABLE_TAGS" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
-    fi
-    success "Latest chart version: $CHART_VERSION"
-  fi
-
-  # --- Step 3: Extract chart ---
-  step "3" "Extracting chart to discover image and config"
-
-  WORK_DIR=$(mktemp -d)
-  trap 'rm -rf "${WORK_DIR:-}"' EXIT
-
-  if [ "$QUIET" = true ]; then
-    crane pull "${CHART_REF}:${CHART_VERSION}" "$WORK_DIR/chart.tar" >/dev/null 2>&1
-  else
-    crane pull "${CHART_REF}:${CHART_VERSION}" "$WORK_DIR/chart.tar"
-  fi
-  mkdir -p "$WORK_DIR/chart-extract"
-  tar -xf "$WORK_DIR/chart.tar" --no-same-owner -C "$WORK_DIR/chart-extract"
-
-  cd "$WORK_DIR/chart-extract"
-  shopt -s nullglob
-  for f in *.tar.gz *.tgz sha256:*; do
-    [ -f "$f" ] && tar -xzf "$f" --no-same-owner 2>/dev/null || true
-  done
-  shopt -u nullglob
-  cd "$SCRIPT_DIR"
-
-  # Find values.yaml
-  local CHART_DIR VALUES_FILE
-  CHART_DIR=$(find "$WORK_DIR/chart-extract" -name "Chart.yaml" -exec dirname {} \; 2>/dev/null | head -1)
-  if [ -n "$CHART_DIR" ] && [ -f "$CHART_DIR/values.yaml" ]; then
-    VALUES_FILE="$CHART_DIR/values.yaml"
-  else
-    VALUES_FILE=$(find "$WORK_DIR/chart-extract" -maxdepth 3 -name "values.yaml" 2>/dev/null | head -1)
-  fi
-
-  if [ -z "$VALUES_FILE" ] || [ ! -f "$VALUES_FILE" ]; then
-    error "Could not find values.yaml in the chart."
-    info "Chart ref: ${CHART_REF}:${CHART_VERSION}"
-    exit 1
-  fi
-
-  success "Found values at: $VALUES_FILE"
-
-  # Parse image
-  local IMAGE_REPO IMAGE_TAG
-  IMAGE_REPO=$(grep -A5 "^image:" "$VALUES_FILE" | grep "repository:" | head -1 | sed 's/.*repository:[[:space:]]*//' | sed "s/[\"']//g" | xargs)
-  IMAGE_TAG=$(grep -A5 "^image:" "$VALUES_FILE" | grep "tag:" | head -1 | sed 's/.*tag:[[:space:]]*//' | sed "s/[\"']//g" | xargs)
-
-  if [ -z "$IMAGE_REPO" ] || [ -z "$IMAGE_TAG" ]; then
-    error "Could not parse image from values.yaml"
-    cat "$VALUES_FILE"
-    exit 1
-  fi
-
-  if [[ ! "$IMAGE_REPO" =~ ^[a-zA-Z0-9._:/-]+$ ]]; then
-    error "Image repository contains invalid characters: $IMAGE_REPO"
-    exit 1
-  fi
-  if [[ ! "$IMAGE_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-    error "Image tag contains invalid characters: $IMAGE_TAG"
-    exit 1
-  fi
-
-  local FULL_IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
-  success "Discovered image: $FULL_IMAGE"
-
-  # Log image digest for supply chain auditability
-  local IMAGE_DIGEST
-  IMAGE_DIGEST=$(crane digest "$FULL_IMAGE" 2>/dev/null || echo "unknown")
-  info "Image digest: $IMAGE_DIGEST"
-  log_deploy "image_resolved" "image=$FULL_IMAGE digest=$IMAGE_DIGEST chart_version=$CHART_VERSION"
-
-  # Parse config defaults from chart, but let .env values take precedence.
-  # Save .env overrides before local declarations shadow them.
-  local env_LOG_LEVEL="${LOG_LEVEL:-}"
-  local env_PRETTY_LOGS="${PRETTY_LOGS:-}"
-  local env_HANDSHAKE_TIMEOUT="${HANDSHAKE_TIMEOUT:-}"
-  local env_PROXY_TIMEOUT="${PROXY_TIMEOUT:-}"
-  local env_CONNECTION_RETRY_INTERVAL="${CONNECTION_RETRY_INTERVAL:-}"
-  local env_POOL_SIZE="${POOL_SIZE:-}"
-  local env_RE_AUTH_INTERVAL="${RE_AUTH_INTERVAL:-}"
-  local env_DISABLE_SSL_VERIFICATION="${DISABLE_SSL_VERIFICATION:-}"
-
-  parse_value() {
-    local raw
-    raw=$(grep "$1:" "$VALUES_FILE" | head -1 | sed "s/.*$1:[[:space:]]*//" | sed "s/[\"']//g" | xargs)
-    echo "$raw"
-  }
-
-  local LOG_LEVEL PRETTY_LOGS HANDSHAKE_TIMEOUT PROXY_TIMEOUT CONNECTION_RETRY_INTERVAL POOL_SIZE RE_AUTH_INTERVAL DISABLE_SSL_VERIFICATION
-  LOG_LEVEL=$(parse_value "logLevel")
-  PRETTY_LOGS=$(parse_value "prettyLogs")
-  HANDSHAKE_TIMEOUT=$(parse_value "handshakeTimeout")
-  PROXY_TIMEOUT=$(parse_value "proxyTimeout")
-  CONNECTION_RETRY_INTERVAL=$(parse_value "connectionRetryInterval")
-  POOL_SIZE=$(parse_value "poolSize")
-  RE_AUTH_INTERVAL=$(parse_value "reAuthInterval")
-  DISABLE_SSL_VERIFICATION=$(parse_value "disableSSLVerification")
-
-  # Precedence: .env override > chart value > hardcoded default
-  LOG_LEVEL="${env_LOG_LEVEL:-${LOG_LEVEL:-INFO}}"
-  PRETTY_LOGS="${env_PRETTY_LOGS:-${PRETTY_LOGS:-false}}"
-  HANDSHAKE_TIMEOUT="${env_HANDSHAKE_TIMEOUT:-${HANDSHAKE_TIMEOUT:-10s}}"
-  PROXY_TIMEOUT="${env_PROXY_TIMEOUT:-${PROXY_TIMEOUT:-100s}}"
-  CONNECTION_RETRY_INTERVAL="${env_CONNECTION_RETRY_INTERVAL:-${CONNECTION_RETRY_INTERVAL:-5s}}"
-  POOL_SIZE="${env_POOL_SIZE:-${POOL_SIZE:-2048}}"
-  RE_AUTH_INTERVAL="${env_RE_AUTH_INTERVAL:-${RE_AUTH_INTERVAL:-5m}}"
-  DISABLE_SSL_VERIFICATION="${env_DISABLE_SSL_VERIFICATION:-${DISABLE_SSL_VERIFICATION:-false}}"
-
-  if [ "${DISABLE_SSL_VERIFICATION}" = "true" ]; then
-    echo ""
-    warn "DISABLE_SSL_VERIFICATION is enabled (Custom SSL mode)."
-    warn "This is intended for on-premises or private cloud deployments"
-    warn "with self-signed or internal CA certificates."
-    warn "Not required for production environments with valid SSL certificates."
-    echo ""
-  fi
-
-  # --- Step 4: Pull image (to temp dir, not SCRIPT_DIR) ---
-  step "4" "Pulling container image"
+  # --- Step 3: Pull image ---
+  step "3" "Pulling container image"
 
   # Skip if already running the same image
   local DIGEST_FILE="$SCRIPT_DIR/.image-digest"
+  local skip_pull=false
+  if [ -f "$DIGEST_FILE" ]; then
+    local COMPOSE_CHECK
+    COMPOSE_CHECK=$(detect_compose)
+    if [ -n "$COMPOSE_CHECK" ] && $COMPOSE_CHECK ps --format json 2>/dev/null | grep -q '"running"'; then
+      local current_image
+      current_image=$(grep "image:" "$SCRIPT_DIR/docker-compose.yml" 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"')
+      if [ "$current_image" = "$FULL_IMAGE" ]; then
+        info "Already running $FULL_IMAGE. Checking for updates..."
+      fi
+    fi
+  fi
+
+  if [ "$QUIET" = true ]; then
+    docker pull "$FULL_IMAGE" >/dev/null 2>&1 || die "Failed to pull image: $FULL_IMAGE"
+  else
+    docker pull "$FULL_IMAGE" || die "Failed to pull image: $FULL_IMAGE"
+  fi
+
+  # Get image digest
+  local IMAGE_DIGEST
+  IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$FULL_IMAGE" 2>/dev/null | cut -d@ -f2 || echo "unknown")
+  info "Image digest: $IMAGE_DIGEST"
+  log_deploy "image_pulled" "image=$FULL_IMAGE digest=$IMAGE_DIGEST"
+
+  # Check if digest changed
   if [ "$IMAGE_DIGEST" != "unknown" ] && [ -f "$DIGEST_FILE" ]; then
     local PREV_DIGEST
     PREV_DIGEST=$(cat "$DIGEST_FILE" 2>/dev/null || echo "")
     if [ "$PREV_DIGEST" = "$IMAGE_DIGEST" ]; then
       local COMPOSE_CHECK
       COMPOSE_CHECK=$(detect_compose)
-      if $COMPOSE_CHECK ps --format json 2>/dev/null | grep -q '"running"'; then
-        info "Already running latest image ($IMAGE_DIGEST). Nothing to do."
+      if [ -n "$COMPOSE_CHECK" ] && $COMPOSE_CHECK ps --format json 2>/dev/null | grep -q '"running"'; then
+        info "Already running latest image. Nothing to do."
         exit 0
       fi
     fi
   fi
 
-  local IMAGE_TAR="$WORK_DIR/panw-client.tar"
-  if [ "$QUIET" = true ]; then
-    crane pull "$FULL_IMAGE" "$IMAGE_TAR" >/dev/null 2>&1
-    docker load -i "$IMAGE_TAR" >/dev/null 2>&1
-  else
-    crane pull "$FULL_IMAGE" "$IMAGE_TAR"
-    docker load -i "$IMAGE_TAR"
+  success "Image pulled."
+
+  # --- Step 4: Write config files ---
+  step "4" "Writing configuration files"
+
+  # Config defaults (.env overrides take precedence)
+  local LOG_LEVEL="${LOG_LEVEL:-INFO}"
+  local PRETTY_LOGS="${PRETTY_LOGS:-false}"
+  local HANDSHAKE_TIMEOUT="${HANDSHAKE_TIMEOUT:-10s}"
+  local PROXY_TIMEOUT="${PROXY_TIMEOUT:-100s}"
+  local CONNECTION_RETRY_INTERVAL="${CONNECTION_RETRY_INTERVAL:-5s}"
+  local POOL_SIZE="${POOL_SIZE:-2048}"
+  local RE_AUTH_INTERVAL="${RE_AUTH_INTERVAL:-5m}"
+  local DISABLE_SSL_VERIFICATION="${DISABLE_SSL_VERIFICATION:-false}"
+
+  if [ "${DISABLE_SSL_VERIFICATION}" = "true" ]; then
+    echo ""
+    warn "DISABLE_SSL_VERIFICATION is enabled (Custom SSL mode)."
+    warn "This is intended for on-premises or private cloud deployments"
+    warn "with self-signed or internal CA certificates."
+    echo ""
   fi
-  success "Image loaded into Docker."
 
-  # --- Step 5: Write config files (with backup) ---
-  step "5" "Writing configuration files"
-
-  # Backup existing files before overwriting
-  for f in .env.setup .env.runtime docker-compose.yml; do
+  # Backup existing files
+  for f in .env.runtime docker-compose.yml; do
     if [ -f "$SCRIPT_DIR/$f" ]; then
       cp "$SCRIPT_DIR/$f" "$SCRIPT_DIR/${f}.bak"
       chmod 600 "$SCRIPT_DIR/${f}.bak"
-      info "Backed up existing $f -> ${f}.bak"
     fi
   done
-
-  # .env.setup (registry credentials only — never passed to container)
-  {
-    printf '# --- Setup credentials (used by setup-panw-network-client.sh) ---\n'
-    printf '# This file is NOT passed to the container.\n'
-    printf 'REGISTRY_USERNAME="%s"\n' "${REGISTRY_USERNAME//\"/\\\"}"
-    printf 'REGISTRY_PASSWORD="%s"\n' "${REGISTRY_PASSWORD//\"/\\\"}"
-    printf 'TENANT_PATH="%s"\n' "${TENANT_PATH//\"/\\\"}"
-    printf 'CHART_VERSION="%s"\n' "${CHART_VERSION//\"/\\\"}"
-  } > "${SCRIPT_DIR}/.env.setup"
-  chmod 600 "${SCRIPT_DIR}/.env.setup"
 
   # .env.runtime (container config)
   {
@@ -971,17 +1320,16 @@ do_install() {
     printf 'POOL_SIZE="%s"\n' "${POOL_SIZE//\"/\\\"}"
     printf 'RE_AUTH_INTERVAL="%s"\n' "${RE_AUTH_INTERVAL//\"/\\\"}"
     printf 'DISABLE_SSL_VERIFICATION="%s"\n' "${DISABLE_SSL_VERIFICATION//\"/\\\"}"
-    # Proxy settings (v1.0.5+)
     [ -n "${HTTP_PROXY:-}" ]  && printf 'HTTP_PROXY="%s"\n' "${HTTP_PROXY//\"/\\\"}"
     [ -n "${HTTPS_PROXY:-}" ] && printf 'HTTPS_PROXY="%s"\n' "${HTTPS_PROXY//\"/\\\"}"
     [ -n "${NO_PROXY:-}" ]    && printf 'NO_PROXY="%s"\n' "${NO_PROXY//\"/\\\"}"
   } > "${SCRIPT_DIR}/.env.runtime"
   chmod 600 "${SCRIPT_DIR}/.env.runtime"
 
-  success ".env.setup and .env.runtime created (mode 600)."
+  success ".env.runtime created (mode 600)."
 
-  # --- Step 6: Generate docker-compose.yml ---
-  step "6" "Creating docker-compose.yml"
+  # --- Step 5: Generate docker-compose.yml ---
+  step "5" "Creating docker-compose.yml"
 
   cat > "$SCRIPT_DIR/docker-compose.yml" <<EOF
 services:
@@ -1014,10 +1362,10 @@ services:
       start_period: 30s
 EOF
 
-  success "docker-compose.yml created (with healthcheck, CPU/PID limits)."
+  success "docker-compose.yml created."
 
-  # --- Step 7: Start ---
-  step "7" "Starting the client"
+  # --- Step 6: Start ---
+  step "6" "Starting the client"
 
   local COMPOSE
   COMPOSE=$(detect_compose)
@@ -1033,14 +1381,14 @@ EOF
     $COMPOSE up -d
   fi
 
-  log_deploy "install" "image=$FULL_IMAGE digest=$IMAGE_DIGEST chart=$CHART_VERSION"
+  log_deploy "install" "image=$FULL_IMAGE digest=$IMAGE_DIGEST"
 
-  # Save digest for up-to-date check on next run
+  # Save digest for up-to-date check
   printf '%s' "$IMAGE_DIGEST" > "$SCRIPT_DIR/.image-digest"
   chmod 600 "$SCRIPT_DIR/.image-digest"
 
-  # --- Step 8: Verify ---
-  step "8" "Verifying startup"
+  # --- Step 7: Verify ---
+  step "7" "Verifying startup"
 
   info "Waiting for container to start..."
   local attempts=0
@@ -1061,7 +1409,7 @@ EOF
     success "Container is running."
     echo ""
 
-    # Wait for connection and check logs
+    # Wait for connection
     info "Waiting for channel connection (up to 30s)..."
     local wait_attempts=0
     local connected=false
@@ -1086,6 +1434,23 @@ EOF
       info "Recent logs:"
       $COMPOSE logs --tail=15 panw-network-client 2>/dev/null | sed 's/^/  /'
     fi
+
+    # API-based verification
+    if [ "$API_AVAILABLE" = true ] && [ -n "${CHANNEL_ID:-}" ]; then
+      echo ""
+      local ch_info
+      ch_info=$(api_get_channel "$CHANNEL_ID" 2>/dev/null) || ch_info=""
+      if [ -n "$ch_info" ]; then
+        local ch_status ch_name
+        ch_status=$(printf '%s' "$ch_info" | json_extract '.status') || ch_status="unknown"
+        ch_name=$(printf '%s' "$ch_info" | json_extract '.name') || ch_name=""
+        if [ "$ch_status" = "ONLINE" ]; then
+          success "API confirms channel is ONLINE: ${ch_name:-$CHANNEL_ID}"
+        else
+          info "API reports channel status: $ch_status"
+        fi
+      fi
+    fi
   fi
 
   # --- Done ---
@@ -1098,7 +1463,6 @@ EOF
     info "Files in: $SCRIPT_DIR"
     echo ""
     echo "  Config files:"
-    echo "    .env.setup   - Registry credentials (script use only)"
     echo "    .env.runtime - Container runtime config"
     echo "    docker-compose.yml"
     echo ""
@@ -1109,7 +1473,7 @@ EOF
     echo "    Follow logs: $COMPOSE logs -f panw-network-client"
     echo "    Stop:        $COMPOSE down"
     echo "    Restart:     $COMPOSE up -d"
-    echo "    Update:      change CHART_VERSION in .env and rerun this script"
+    echo "    Update:      re-run this script (auto-detects new versions)"
     echo ""
   fi
 }
