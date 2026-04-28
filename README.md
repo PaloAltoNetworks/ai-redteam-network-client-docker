@@ -81,7 +81,7 @@ Pattern-matches container logs against known error signatures:
 |---|---|
 | **Docker** | 20.10+ with Docker Compose (v1 or v2) |
 | **OS** | Linux (x86_64, aarch64) or macOS (Intel, Apple Silicon) |
-| **Tools** | `curl` |
+| **Tools** | `curl`, `jq` |
 | **Network** | Outbound HTTPS to `*.paloaltonetworks.com` |
 
 ---

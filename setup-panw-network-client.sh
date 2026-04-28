@@ -26,7 +26,7 @@ set -euo pipefail
 #
 # Prerequisites:
 #   - Docker (20.10+) with Docker Compose
-#   - curl
+#   - curl, jq
 #   - Outbound HTTPS to *.paloaltonetworks.com
 # =============================================================================
 
@@ -159,23 +159,7 @@ API_TOKEN_EXPIRY=0
 API_AVAILABLE=false
 
 json_extract() {
-  local filter="$1"
-  if command -v jq &>/dev/null; then
-    jq -re "$filter" 2>/dev/null
-  else
-    local key="${filter#.}"
-    grep -o "\"${key}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | sed 's/.*:[[:space:]]*"\(.*\)"/\1/'
-  fi
-}
-
-json_extract_raw() {
-  local filter="$1"
-  if command -v jq &>/dev/null; then
-    jq -re "$filter" 2>/dev/null
-  else
-    local key="${filter#.}"
-    grep -o "\"${key}\"[[:space:]]*:[[:space:]]*[0-9]*" | head -1 | sed 's/.*:[[:space:]]*//'
-  fi
+  jq -re "$1" 2>/dev/null
 }
 
 validate_uuid() {
@@ -231,7 +215,7 @@ api_authenticate() {
   [ -z "$token" ] && return 1
 
   local expires_in
-  expires_in=$(printf '%s' "$response" | json_extract_raw '.expires_in') || expires_in=899
+  expires_in=$(printf '%s' "$response" | json_extract '.expires_in') || expires_in=899
 
   API_TOKEN="$token"
   API_TOKEN_EXPIRY=$(( $(date +%s) + expires_in - 60 ))
@@ -399,6 +383,36 @@ api_get_registry_credentials() {
   esac
 }
 
+# Print channel status from the API. Args: format = "verbose"|"compact"
+api_print_channel_status() {
+  local format="${1:-verbose}"
+  [ -z "${CHANNEL_ID:-}" ] && return 0
+
+  local ch_info ch_status ch_name
+  ch_info=$(api_get_channel "$CHANNEL_ID" 2>/dev/null) || ch_info=""
+  if [ -z "$ch_info" ]; then
+    if [ "$format" = "verbose" ]; then
+      warn "Could not retrieve channel info from API."
+    else
+      warn "Channel $CHANNEL_ID not found via API"
+    fi
+    return 1
+  fi
+
+  ch_status=$(printf '%s' "$ch_info" | json_extract '.status') || ch_status="unknown"
+  ch_name=$(printf '%s' "$ch_info" | json_extract '.name') || ch_name=""
+
+  if [ "$format" = "verbose" ]; then
+    if [ "$ch_status" = "ONLINE" ]; then
+      success "Channel '$ch_name' is ONLINE (confirmed by API)"
+    else
+      warn "Channel '$ch_name' status: $ch_status (API)"
+    fi
+  else
+    info "Channel: $ch_name | Status: $ch_status | ID: $CHANNEL_ID"
+  fi
+}
+
 # --- Channel selection ---
 
 select_channel() {
@@ -412,11 +426,7 @@ select_channel() {
   }
 
   local total
-  if command -v jq &>/dev/null; then
-    total=$(printf '%s' "$channels_json" | jq -r '.data | length' 2>/dev/null) || total=0
-  else
-    total=$(printf '%s' "$channels_json" | grep -o '"uuid"' | wc -l | tr -d ' ')
-  fi
+  total=$(printf '%s' "$channels_json" | jq -r '.data | length' 2>/dev/null) || total=0
 
   if [ "$total" -eq 0 ]; then
     info "No channels found. Let's create one."
@@ -440,36 +450,16 @@ select_channel() {
   local selectable_ids=()
   local selectable_names=()
 
-  if command -v jq &>/dev/null; then
-    while IFS=$'\t' read -r uuid name status last_online; do
-      if [ "$status" = "ONLINE" ]; then
-        printf "     %s  %-30s ${GREEN}ONLINE${NC}  (in use)\n" "-" "$name"
-      else
-        printf "  [${BOLD}%d${NC}] %-30s %s\n" "$idx" "$name" "$status"
-        selectable_ids+=("$uuid")
-        selectable_names+=("$name")
-        idx=$((idx + 1))
-      fi
-    done < <(printf '%s' "$channels_json" | jq -r '.data[] | [.uuid, .name, .status, .last_online_at] | @tsv' 2>/dev/null)
-  else
-    local uuids names statuses
-    uuids=$(printf '%s' "$channels_json" | grep -o '"uuid":"[^"]*"' | sed 's/"uuid":"//;s/"//')
-    names=$(printf '%s' "$channels_json" | grep -o '"name":"[^"]*"' | sed 's/"name":"//;s/"//')
-    statuses=$(printf '%s' "$channels_json" | grep -o '"status":"[^"]*"' | sed 's/"status":"//;s/"//')
-
-    local i=1
-    while IFS= read -r uuid && IFS= read -r name <&3 && IFS= read -r status <&4; do
-      if [ "$status" = "ONLINE" ]; then
-        printf "     %s  %-30s ONLINE  (in use)\n" "-" "$name"
-      else
-        printf "  [%d] %-30s %s\n" "$idx" "$name" "$status"
-        selectable_ids+=("$uuid")
-        selectable_names+=("$name")
-        idx=$((idx + 1))
-      fi
-      i=$((i + 1))
-    done <<< "$uuids" 3<<< "$names" 4<<< "$statuses"
-  fi
+  while IFS=$'\t' read -r uuid name status last_online; do
+    if [ "$status" = "ONLINE" ]; then
+      printf "     %s  %-30s ${GREEN}ONLINE${NC}  (in use)\n" "-" "$name"
+    else
+      printf "  [${BOLD}%d${NC}] %-30s %s\n" "$idx" "$name" "$status"
+      selectable_ids+=("$uuid")
+      selectable_names+=("$name")
+      idx=$((idx + 1))
+    fi
+  done < <(printf '%s' "$channels_json" | jq -r '.data[] | [.uuid, .name, .status, .last_online_at] | @tsv' 2>/dev/null)
 
   local create_idx=$idx
   printf "  [${BOLD}%d${NC}] Create a new channel\n" "$create_idx"
@@ -540,7 +530,6 @@ select_region() {
 
   local idx=1
   for entry in "${KNOWN_REGISTRIES[@]}"; do
-    local code="${entry%%|*}"
     local rest="${entry#*|}"
     local reg="${rest%%|*}"
     local location="${rest##*|}"
@@ -849,22 +838,7 @@ do_validate() {
     info "Checking channel via API..."
     if api_authenticate 2>/dev/null; then
       success "OAuth2 authentication: OK"
-      if [ -n "${CHANNEL_ID:-}" ]; then
-        local ch_info
-        ch_info=$(api_get_channel "$CHANNEL_ID" 2>/dev/null) || ch_info=""
-        if [ -n "$ch_info" ]; then
-          local ch_status ch_name
-          ch_status=$(printf '%s' "$ch_info" | json_extract '.status') || ch_status="unknown"
-          ch_name=$(printf '%s' "$ch_info" | json_extract '.name') || ch_name=""
-          if [ "$ch_status" = "ONLINE" ]; then
-            success "Channel '$ch_name' is ONLINE (confirmed by API)"
-          else
-            warn "Channel '$ch_name' status: $ch_status (API)"
-          fi
-        else
-          warn "Could not retrieve channel info from API."
-        fi
-      fi
+      api_print_channel_status verbose
     else
       info "API authentication failed (non-critical). Log-based validation above still applies."
     fi
@@ -1022,19 +996,7 @@ do_diagnose() {
       success "OAuth2 authentication: OK"
       [ -n "${TSG_ID:-}" ] && info "TSG ID: ${TSG_ID}"
 
-      # Channel status
-      if [ -n "${CHANNEL_ID:-}" ]; then
-        local ch_info
-        ch_info=$(api_get_channel "$CHANNEL_ID" 2>/dev/null) || ch_info=""
-        if [ -n "$ch_info" ]; then
-          local ch_status ch_name
-          ch_status=$(printf '%s' "$ch_info" | json_extract '.status') || ch_status="unknown"
-          ch_name=$(printf '%s' "$ch_info" | json_extract '.name') || ch_name=""
-          info "Channel: $ch_name | Status: $ch_status | ID: $CHANNEL_ID"
-        else
-          warn "Channel $CHANNEL_ID not found via API"
-        fi
-      fi
+      api_print_channel_status compact
 
       # Image info from stats
       local stats
@@ -1103,6 +1065,14 @@ preflight() {
     success "curl"
   fi
 
+  # jq
+  if ! command -v jq &>/dev/null; then
+    error "jq is not installed. Install: https://jqlang.github.io/jq/download/"
+    failed=true
+  else
+    success "jq"
+  fi
+
   # Network connectivity (only for install)
   if [ "$label" = "install" ]; then
     local code
@@ -1149,11 +1119,7 @@ do_install() {
     echo ""
     info "Continuing with installation..."
     echo ""
-    load_env "$ENV_FILE"
-  else
-    load_env "$ENV_FILE"
   fi
-
   load_env "$ENV_FILE"
 
   # Backwards compatibility
@@ -1234,20 +1200,7 @@ do_install() {
   # --- Step 3: Pull image ---
   step "3" "Pulling container image"
 
-  # Skip if already running the same image
   local DIGEST_FILE="$SCRIPT_DIR/.image-digest"
-  local skip_pull=false
-  if [ -f "$DIGEST_FILE" ]; then
-    local COMPOSE_CHECK
-    COMPOSE_CHECK=$(detect_compose)
-    if [ -n "$COMPOSE_CHECK" ] && $COMPOSE_CHECK ps --format json 2>/dev/null | grep -q '"running"'; then
-      local current_image
-      current_image=$(grep "image:" "$SCRIPT_DIR/docker-compose.yml" 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"')
-      if [ "$current_image" = "$FULL_IMAGE" ]; then
-        info "Already running $FULL_IMAGE. Checking for updates..."
-      fi
-    fi
-  fi
 
   if [ "$QUIET" = true ]; then
     docker pull "$FULL_IMAGE" >/dev/null 2>&1 || die "Failed to pull image: $FULL_IMAGE"
