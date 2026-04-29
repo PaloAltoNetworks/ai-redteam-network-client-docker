@@ -158,6 +158,22 @@ API_TOKEN=""
 API_TOKEN_EXPIRY=0
 API_AVAILABLE=false
 
+# Track auth-header temp files so SIGINT/SIGTERM cannot leave bearer tokens on disk.
+_TMP_FILES=()
+_cleanup_tmp_files() {
+  [ ${#_TMP_FILES[@]} -gt 0 ] && rm -f "${_TMP_FILES[@]}" 2>/dev/null || true
+}
+trap _cleanup_tmp_files EXIT INT TERM HUP
+
+# Create a mode-600 temp file and register it for cleanup. Prints path on stdout.
+new_auth_tmp() {
+  local f
+  f=$(mktemp) || return 1
+  chmod 600 "$f"
+  _TMP_FILES+=("$f")
+  printf '%s' "$f"
+}
+
 json_extract() {
   jq -re "$1" 2>/dev/null
 }
@@ -187,8 +203,7 @@ api_authenticate() {
   fi
 
   local _auth_hdr
-  _auth_hdr=$(mktemp) || return 1
-  chmod 600 "$_auth_hdr"
+  _auth_hdr=$(new_auth_tmp) || return 1
 
   local basic_cred
   basic_cred=$(printf '%s:%s' "$client_id" "$client_secret" | base64 | tr -d '\n')
@@ -251,8 +266,7 @@ api_call() {
   api_ensure_token || return 1
 
   local _call_hdr
-  _call_hdr=$(mktemp) || return 1
-  chmod 600 "$_call_hdr"
+  _call_hdr=$(new_auth_tmp) || return 1
 
   printf 'Authorization: Bearer %s\n' "$API_TOKEN" > "$_call_hdr"
 
@@ -349,8 +363,7 @@ api_get_registry_credentials() {
   api_ensure_token || return 1
 
   local _reg_header_file
-  _reg_header_file=$(mktemp) || return 1
-  chmod 600 "$_reg_header_file"
+  _reg_header_file=$(new_auth_tmp) || return 1
 
   printf 'Authorization: Bearer %s\n' "$API_TOKEN" > "$_reg_header_file"
 
