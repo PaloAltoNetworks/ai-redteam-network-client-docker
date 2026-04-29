@@ -87,6 +87,9 @@ Options:
   --status          Check current deployment state
   --validate        Verify the channel is connected after setup
   --diagnose        Analyze container logs for common issues
+  --version TAG     Use specific image tag (e.g. 1.2.1). Skips API recommendation.
+  --list-versions   List available image tags from registry and exit
+  --yes, -y         Non-interactive: accept API-recommended version without prompt
   --quiet, -q       Suppress info/success output (errors and warnings only)
   --help            Show this help message
 
@@ -102,17 +105,24 @@ USAGE
 MODE="install"
 DRY_RUN=false
 QUIET=false
+ASSUME_YES=false
+VERSION_OVERRIDE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --init)      MODE="init"; shift ;;
-    --dry-run)   DRY_RUN=true; shift ;;
-    --status)    MODE="status"; shift ;;
-    --validate)  MODE="validate"; shift ;;
-    --diagnose)  MODE="diagnose"; shift ;;
-    --quiet|-q)  QUIET=true; shift ;;
-    --help|-h)   usage ;;
-    *)           error "Unknown option: $1"; exit 1 ;;
+    --init)           MODE="init"; shift ;;
+    --dry-run)        DRY_RUN=true; shift ;;
+    --status)         MODE="status"; shift ;;
+    --validate)       MODE="validate"; shift ;;
+    --diagnose)       MODE="diagnose"; shift ;;
+    --list-versions)  MODE="list-versions"; shift ;;
+    --version)        [ -z "${2:-}" ] && { error "--version requires a tag"; exit 1; }
+                      VERSION_OVERRIDE="$2"; shift 2 ;;
+    --version=*)      VERSION_OVERRIDE="${1#--version=}"; shift ;;
+    --yes|-y)         ASSUME_YES=true; shift ;;
+    --quiet|-q)       QUIET=true; shift ;;
+    --help|-h)        usage ;;
+    *)                error "Unknown option: $1"; exit 1 ;;
   esac
 done
 
@@ -389,6 +399,85 @@ api_get_registry_credentials() {
   esac
 }
 
+# Fetch available image tags from the Docker Registry v2 API.
+# Args: $1 = registry host, $2 = image path (without tag), $3 = TSG_ID, $4 = registry password
+# Prints tags (newline-separated) on stdout. Handles token auth challenge.
+registry_list_tags() {
+  { set +x; } 2>/dev/null
+  local registry="$1" image_name="$2" tsg_id="$3" password="$4"
+  [ -z "$registry" ] || [ -z "$image_name" ] || [ -z "$tsg_id" ] || [ -z "$password" ] && return 1
+
+  local tags_url="https://${registry}/v2/${image_name}/tags/list"
+  local challenge http_code response
+
+  # First attempt: Basic auth
+  local basic_resp
+  basic_resp=$(curl --silent --show-error \
+    --proto "=https" \
+    --connect-timeout 10 \
+    --max-time 30 \
+    -u "${tsg_id}:${password}" \
+    --write-out '\n%{http_code}' \
+    "$tags_url" 2>/dev/null) || return 1
+
+  http_code=$(printf '%s' "$basic_resp" | tail -1)
+  response=$(printf '%s' "$basic_resp" | sed '$d')
+
+  # Handle bearer challenge if Basic rejected
+  if [ "$http_code" = "401" ]; then
+    local hdr_file
+    hdr_file=$(new_auth_tmp) || return 1
+    challenge=$(curl --silent --show-error \
+      --proto "=https" --connect-timeout 10 --max-time 15 \
+      -D "$hdr_file" -o /dev/null \
+      "$tags_url" 2>/dev/null || true)
+    local www_auth
+    www_auth=$(grep -i '^www-authenticate:' "$hdr_file" 2>/dev/null | head -1 | tr -d '\r')
+    rm -f "$hdr_file"
+
+    [[ "$www_auth" =~ realm=\"([^\"]+)\" ]] || return 1
+    local realm="${BASH_REMATCH[1]}"
+    local service="" scope=""
+    [[ "$www_auth" =~ service=\"([^\"]+)\" ]] && service="${BASH_REMATCH[1]}"
+    [[ "$www_auth" =~ scope=\"([^\"]+)\" ]] && scope="${BASH_REMATCH[1]}"
+    [ -z "$scope" ] && scope="repository:${image_name}:pull"
+
+    local token_url="${realm}?service=${service}&scope=${scope}"
+    local token_resp bearer
+    token_resp=$(curl --silent --show-error \
+      --proto "=https" --connect-timeout 10 --max-time 30 \
+      -u "${tsg_id}:${password}" \
+      --get --data-urlencode "service=${service}" --data-urlencode "scope=${scope}" \
+      "$realm" 2>/dev/null) || return 1
+    bearer=$(printf '%s' "$token_resp" | json_extract '.token // .access_token') || return 1
+    [ -z "$bearer" ] && return 1
+
+    local auth_hdr
+    auth_hdr=$(new_auth_tmp) || return 1
+    printf 'Authorization: Bearer %s\n' "$bearer" > "$auth_hdr"
+    basic_resp=$(curl --silent --show-error \
+      --proto "=https" --connect-timeout 10 --max-time 30 \
+      --header @"$auth_hdr" \
+      --write-out '\n%{http_code}' \
+      "$tags_url" 2>/dev/null) || { rm -f "$auth_hdr"; return 1; }
+    rm -f "$auth_hdr"
+    http_code=$(printf '%s' "$basic_resp" | tail -1)
+    response=$(printf '%s' "$basic_resp" | sed '$d')
+  fi
+
+  case "$http_code" in
+    2[0-9][0-9]) ;;
+    *) return 1 ;;
+  esac
+
+  printf '%s' "$response" | jq -r '.tags[]?' 2>/dev/null || return 1
+}
+
+# Sort semver tags descending (newest first). Filters to strict X.Y.Z format.
+semver_sort_desc() {
+  grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V -r
+}
+
 # Returns 0 when REGISTRY_TOKEN is missing, has no expiry, or expires within 24h.
 # Relies on lexicographic ordering of ISO 8601 UTC timestamps.
 registry_token_needs_refresh() {
@@ -600,6 +689,7 @@ select_region() {
 discover_image_from_api() {
   if [ -n "${IMAGE_PATH:-}" ]; then
     info "Using IMAGE_PATH override from .env"
+    IMAGE_PATH_FROM_ENV=1
     return 0
   fi
 
@@ -622,6 +712,99 @@ discover_image_from_api() {
 
   IMAGE_PATH="$docker_image"
   info "Image discovered from API: $IMAGE_PATH"
+  return 0
+}
+
+# Split IMAGE_PATH into repo + tag. Sets globals IMAGE_REPO, IMAGE_TAG.
+split_image_path() {
+  local full="${1:-$IMAGE_PATH}"
+  if [[ "$full" == *:* ]]; then
+    IMAGE_REPO="${full%:*}"
+    IMAGE_TAG="${full##*:}"
+  else
+    IMAGE_REPO="$full"
+    IMAGE_TAG=""
+  fi
+}
+
+# Interactive version selection. Uses: VERSION_OVERRIDE, ASSUME_YES, REGISTRY, IMAGE_PATH, TSG_ID, REGISTRY_PASSWORD.
+# Mutates IMAGE_PATH to the selected tag.
+select_image_version() {
+  split_image_path "$IMAGE_PATH"
+  local recommended="$IMAGE_TAG"
+  local repo="$IMAGE_REPO"
+
+  # Explicit --version override: validate against registry then apply
+  if [ -n "$VERSION_OVERRIDE" ]; then
+    IMAGE_PATH="${repo}:${VERSION_OVERRIDE}"
+    info "Version override: $VERSION_OVERRIDE (recommended was $recommended)"
+    return 0
+  fi
+
+  # Non-interactive or -y: accept recommended
+  if [ "$ASSUME_YES" = true ] || [ ! -t 0 ]; then
+    return 0
+  fi
+
+  # Fetch tag list
+  local tags
+  tags=$(registry_list_tags "$REGISTRY" "$repo" "$TSG_ID" "$REGISTRY_PASSWORD" 2>/dev/null) || {
+    warn "Could not list tags from registry. Using recommended: $recommended"
+    return 0
+  }
+
+  local sorted
+  sorted=$(printf '%s\n' "$tags" | semver_sort_desc)
+  [ -z "$sorted" ] && { warn "No semver tags found. Using recommended: $recommended"; return 0; }
+
+  local latest
+  latest=$(printf '%s\n' "$sorted" | head -1)
+
+  echo ""
+  info "Recommended (from API): $recommended"
+  [ "$latest" != "$recommended" ] && info "Latest in registry:     $latest"
+  info "Available versions:"
+  local i=1 tag choice
+  local -a tag_arr=()
+  while IFS= read -r tag; do
+    tag_arr+=("$tag")
+    local marker=""
+    [ "$tag" = "$recommended" ] && marker=" (recommended)"
+    [ "$tag" = "$latest" ] && [ "$tag" != "$recommended" ] && marker=" (latest)"
+    printf "  %d) %s%s\n" "$i" "$tag" "$marker"
+    i=$((i + 1))
+    [ "$i" -gt 20 ] && break
+  done <<< "$sorted"
+
+  printf "\nSelect version [Enter=recommended %s, or number/tag]: " "$recommended"
+  read -r choice
+
+  # Empty = recommended
+  if [ -z "$choice" ]; then
+    info "Using recommended: $recommended"
+    return 0
+  fi
+
+  # Numeric = index into tag_arr
+  if [[ "$choice" =~ ^[0-9]+$ ]]; then
+    local idx=$((choice - 1))
+    if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#tag_arr[@]}" ]; then
+      IMAGE_PATH="${repo}:${tag_arr[$idx]}"
+      info "Selected: ${tag_arr[$idx]}"
+      return 0
+    fi
+    warn "Invalid selection. Using recommended: $recommended"
+    return 0
+  fi
+
+  # Literal tag — must exist in fetched list
+  if printf '%s\n' "$tags" | grep -qxF "$choice"; then
+    IMAGE_PATH="${repo}:${choice}"
+    info "Selected: $choice"
+    return 0
+  fi
+
+  warn "Tag '$choice' not found in registry. Using recommended: $recommended"
   return 0
 }
 
@@ -1158,6 +1341,60 @@ preflight() {
 }
 
 # =============================================================================
+# MODE: list-versions (Print available image tags and exit)
+# =============================================================================
+
+do_list_versions() {
+  [ -f "$ENV_FILE" ] || die ".env not found. Run --init first."
+  load_env "$ENV_FILE"
+  migrate_env_if_needed
+
+  [ -z "${CLIENT_ID:-}" ] || [ -z "${CLIENT_SECRET:-}" ] \
+    && die "CLIENT_ID and CLIENT_SECRET must be set in .env"
+
+  [ -z "${TSG_ID:-}" ] && { TSG_ID=$(extract_tsg_id "$CLIENT_ID") || die "Cannot extract TSG_ID"; }
+  resolve_registry
+  api_authenticate || die "Authentication failed."
+
+  local REGISTRY_PASSWORD="${REGISTRY_TOKEN:-}"
+  if registry_token_needs_refresh; then
+    local reg_response
+    reg_response=$(api_get_registry_credentials 2>/dev/null) || die "Could not fetch registry credentials."
+    REGISTRY_PASSWORD=$(printf '%s' "$reg_response" | json_extract '.token') || die "Invalid registry credentials."
+    local reg_expiry
+    reg_expiry=$(printf '%s' "$reg_response" | json_extract '.expiry') || reg_expiry=""
+    persist_registry_token "$REGISTRY_PASSWORD" "$reg_expiry" || true
+  fi
+
+  discover_image_from_api || die "Could not discover image from API."
+  split_image_path "$IMAGE_PATH"
+  local recommended="$IMAGE_TAG" repo="$IMAGE_REPO"
+
+  info "Registry:    $REGISTRY"
+  info "Image:       $repo"
+  info "Recommended: $recommended"
+  echo ""
+
+  local tags
+  tags=$(registry_list_tags "$REGISTRY" "$repo" "$TSG_ID" "$REGISTRY_PASSWORD") \
+    || die "Could not list tags from registry."
+
+  local sorted
+  sorted=$(printf '%s\n' "$tags" | semver_sort_desc)
+  [ -z "$sorted" ] && die "No semver-formatted tags found."
+
+  info "Available versions (newest first):"
+  while IFS= read -r tag; do
+    local marker=""
+    [ "$tag" = "$recommended" ] && marker=" (recommended)"
+    printf "  - %s%s\n" "$tag" "$marker"
+  done <<< "$sorted"
+
+  echo ""
+  info "Pin a specific version with:  ./setup-panw-network-client.sh --version TAG"
+}
+
+# =============================================================================
 # MODE: install (Main setup flow)
 # =============================================================================
 
@@ -1236,6 +1473,11 @@ do_install() {
   # Discover image
   if ! discover_image_from_api; then
     die "Could not discover image. Set IMAGE_PATH in .env (format: path/image:tag)"
+  fi
+
+  # Offer version selection (skipped when IMAGE_PATH overridden in .env)
+  if [ -z "${IMAGE_PATH_FROM_ENV:-}" ]; then
+    select_image_version
   fi
 
   local FULL_IMAGE="${REGISTRY}/${IMAGE_PATH}"
@@ -1530,9 +1772,10 @@ fi
 # =============================================================================
 
 case "$MODE" in
-  init)     do_init ;;
-  status)   do_status ;;
-  validate) do_validate ;;
-  diagnose) do_diagnose ;;
-  install)  do_install ;;
+  init)           do_init ;;
+  status)         do_status ;;
+  validate)       do_validate ;;
+  diagnose)       do_diagnose ;;
+  list-versions)  do_list_versions ;;
+  install)        do_install ;;
 esac
