@@ -1,313 +1,50 @@
-# AI Red Teaming Network Client - Docker Setup
+# PANW AI Red Teaming — Docker Client
 
-Deploy the Palo Alto Networks AI Red Teaming network client using **Docker Compose** on a standard server (Linux or macOS) — no Kubernetes or Helm required.
+One-command Docker Compose install for the Palo Alto Networks AI Red Teaming network client. No Kubernetes, no Helm.
 
-## Quick Start
+![Demo](demo.svg)
+
+## Install
 
 ```bash
-# 1. Clone this repo
 git clone https://github.com/PaloAltoNetworks/ai-redteam-network-client-docker.git
 cd ai-redteam-network-client-docker
-
-# 2. Run (auto-launches setup if no .env exists)
 chmod +x setup-panw-network-client.sh
 ./setup-panw-network-client.sh
+```
 
-# 3. Verify the channel is connected
+Prompts for **region**, **Client ID**, **Client Secret**. Everything else auto-discovered from the API (TSG ID, registry credentials, image version, channel).
+
+## Verify
+
+```bash
 ./setup-panw-network-client.sh --validate
 ```
 
-The setup asks only for your **region, Client ID, and Client Secret** — then lets you pick a channel from the API. Everything else (TSG ID, registry credentials, image version) is auto-discovered.
+Expect `Connected to the server` in the logs, or see **Validate Channel** in the portal.
 
-Look for **"Connected to the server"** in the logs, or click **Validate Channel** in the portal.
+## Why
 
----
+Palo Alto's portal only ships Kubernetes/Helm instructions. This runs on any server with Docker (EC2, VM, bare metal) in three commands.
 
-## Why This Exists
+The script:
+1. Authenticates via OAuth2, auto-discovers channels, registry creds, and image.
+2. Pulls the image via Docker.
+3. Generates a hardened `docker-compose.yml` (read-only FS, dropped caps, resource limits, healthcheck).
 
-The Palo Alto AI Red Teaming portal provides Kubernetes/Helm deployment instructions. This repository offers a simpler alternative for teams that run Docker Compose on standard servers (e.g., EC2 instances) without a Kubernetes cluster.
+## Security highlights
 
-The setup script:
+- Read-only filesystem, all capabilities dropped, no privilege escalation
+- Memory / CPU / PID limits
+- Credentials never visible in `ps` (`--header @file` pattern)
+- `.env` files at `chmod 600`, `.gitignore` pre-configured
+- Image digest logged to `deploy.log` for SOC 2 / ISO 27001
 
-1. **Authenticates via OAuth2** — validates your service account and auto-discovers channels, registry credentials, and the container image from the API.
-2. **Pulls the container image via Docker** — no external tools required beyond Docker itself.
-3. **Generates a hardened `docker-compose.yml`** — with read-only filesystem, dropped capabilities, memory/CPU limits, and health checks.
+## Docs
 
----
-
-## CLI Modes
-
-| Command | Description |
-|---|---|
-| `./setup-panw-network-client.sh` | Full install (auto-runs `--init` if no `.env` exists) |
-| `./setup-panw-network-client.sh --init` | Interactive guided setup — creates `.env` |
-| `./setup-panw-network-client.sh --dry-run` | Show what would happen without making changes |
-| `./setup-panw-network-client.sh --status` | Check current deployment state |
-| `./setup-panw-network-client.sh --validate` | Verify the channel is connected |
-| `./setup-panw-network-client.sh --diagnose` | Analyze container logs for common issues |
-| `./setup-panw-network-client.sh --quiet` | Suppress info/success output (errors and warnings only) — for CI/automation |
-
-### Interactive Setup (`--init`)
-
-The `--init` mode guides you through creating the `.env` file. You provide:
-
-1. **Region** — Americas (US), Europe (NL), or Asia Pacific (SG)
-2. **Client ID** — from the service account in the portal
-3. **Client Secret** — from the service account in the portal
-4. **Channel** — pick from the list returned by the API (or create a new one on the fly)
-
-Auto-discovered, no input needed:
-- **TSG ID** — extracted from the Client ID (you'll be prompted if the format is non-standard)
-- **Registry credentials** — fetched from the management API
-- **Image + version** — resolved from the stats API
-
-### Dry Run (`--dry-run`)
-
-Shows exactly what the script would do without modifying anything. Use this for change management approval or to preview the setup before committing.
-
-### Diagnostics (`--diagnose`)
-
-Pattern-matches container logs against known error signatures:
-- Authentication failures (bad CLIENT_ID/CLIENT_SECRET)
-- TLS/certificate errors (proxy interception, expired certs)
-- Network connectivity issues (firewall, DNS)
-- Channel configuration errors (wrong CHANNEL_ID)
-- Permission errors (missing Superuser role)
-
----
-
-## Prerequisites
-
-| Requirement | Details |
-|---|---|
-| **Docker** | 20.10+ recommended, with Docker Compose (v1 or v2) |
-| **OS** | Linux (x86_64, aarch64) or macOS (Intel, Apple Silicon) |
-| **Tools** | `curl`, `jq` |
-| **Network** | Outbound HTTPS to `*.paloaltonetworks.com` |
-
----
-
-## Credentials
-
-You only need a [service account](https://docs.paloaltonetworks.com/common-services/identity-and-access-access-management/manage-identity-and-access/add-service-accounts) (Client ID + Client Secret). No need to create a channel first — the script handles that.
-
----
-
-## Configuration
-
-### `.env` (generated by `--init`)
-
-```env
-CLIENT_ID="name@123456.iam.panserviceaccount.com"
-CLIENT_SECRET="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-TSG_ID="123456"
-CHANNEL_ID="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-REGION="us"
-REGISTRY_TOKEN="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-REGISTRY_TOKEN_EXPIRY="2027-..."
-```
-
-### Generated Files
-
-The script produces:
-
-| File | Contents | Passed to Container |
-|---|---|---|
-| `.env.runtime` | Client ID, secret, channel ID, tunables | Yes |
-| `docker-compose.yml` | Hardened container configuration | — |
-
-The `.env.runtime` file is created with `chmod 600` (owner-only access). Existing files are backed up to `.bak` before overwriting.
-
-### Runtime Tunables
-
-Override in `.env` and re-run the script (or edit `.env.runtime` and restart):
-
-| Variable | Default | Description |
-|---|---|---|
-| `LOG_LEVEL` | `INFO` | Logging verbosity |
-| `POOL_SIZE` | `2048` | Max concurrent connections |
-| `PROXY_TIMEOUT` | `100s` | Timeout for target responses |
-| `CONNECTION_RETRY_INTERVAL` | `5s` | Retry interval for failed connections |
-| `RE_AUTH_INTERVAL` | `5m` | Re-authentication frequency |
-| `DISABLE_SSL_VERIFICATION` | `false` | **Must be `false` in production** |
-
-### Advanced Overrides
-
-Set in `.env` only if you need to override API-discovered values:
-
-| Variable | Purpose |
-|---|---|
-| `IMAGE_PATH` | Override API-discovered image (format: `path/image:tag`) |
-| `REGISTRY_HOST` | Override region-based registry hostname |
-| `TSG_ID` | Explicit TSG ID (if auto-extraction from CLIENT_ID fails) |
-
----
-
-## Security
-
-The generated `docker-compose.yml` applies these hardening measures:
-
-```yaml
-read_only: true                        # Immutable filesystem
-security_opt: [no-new-privileges:true] # No privilege escalation
-cap_drop: [ALL]                        # Minimal capabilities
-mem_limit: 512m                        # Memory limit
-cpus: 1.0                              # CPU limit
-pids_limit: 256                        # Fork bomb protection
-healthcheck: ...                       # Automatic health monitoring
-```
-
-Additional protections:
-- API credentials use `--header @file` pattern (never visible in `ps` or process args)
-- All credential functions disable shell tracing (`set +x`)
-- `.env` and `.env.runtime` created with `600` permissions
-- `.gitignore` prevents committing secrets
-- Temp files use `mktemp` + `chmod 600` + explicit cleanup
-- Image digest logged to `deploy.log` for supply chain auditability
-- Registry token is long-lived (~1 year) but auto-refreshed when expired
-- HTTPS-only enforcement on all API calls (`--proto =https`)
-
-### Deployment Audit Log
-
-Every install and image pull is logged to `deploy.log` with timestamps and image digests. This file never contains secrets and supports compliance requirements (SOC 2, ISO 27001).
-
----
-
-## Operations
-
-### Managing the Client
-
-```bash
-./setup-panw-network-client.sh --status      # Deployment overview
-./setup-panw-network-client.sh --validate     # Check channel connectivity
-./setup-panw-network-client.sh --diagnose     # Troubleshoot issues
-
-docker compose logs -f panw-network-client    # Follow logs
-docker compose down                           # Stop
-docker compose up -d                          # Start
-docker compose restart                        # Restart after config changes
-docker stats panw-network-client              # Resource usage
-```
-
-### Health Monitoring
-
-The container includes a Docker healthcheck. Inspect it with:
-
-```bash
-docker inspect --format='{{.State.Health.Status}}' $(docker ps -qf name=panw-network-client)
-```
-
-### Updating
-
-Re-run the script — it auto-detects the latest image version from the API:
-
-```bash
-./setup-panw-network-client.sh
-```
-
-If the image hasn't changed and the container is already running, it exits early with "Already running latest image."
-
-### Credential Rotation
-
-1. Generate new credentials in the portal
-2. Re-run `./setup-panw-network-client.sh --init`
-3. Deploy: `./setup-panw-network-client.sh`
-4. Verify: `./setup-panw-network-client.sh --validate`
-5. Revoke old credentials in the portal
-6. **Delete stale backups** — remove `.env.old`, `.env.runtime.bak`, and `docker-compose.yml.bak`; they still contain the old secrets:
-   ```bash
-   shred -u .env.old .env.runtime.bak docker-compose.yml.bak 2>/dev/null || rm -f .env.old .env.runtime.bak docker-compose.yml.bak
-   ```
-
-> **Note on backup files**
-> - `.env.old` is created once by the format migration and never auto-deleted.
-> - `.env.runtime.bak` and `docker-compose.yml.bak` are rewritten every install run.
-> - None of these are pruned automatically — rotate them out manually after each credential change to stay compliant with data-minimization (GDPR, SOC 2).
-
-### Backup
-
-```bash
-tar -czf panw-client-backup-$(date +%Y%m%d).tar.gz .env .env.runtime docker-compose.yml deploy.log
-```
-
-### Uninstall
-
-```bash
-docker compose down                                    # Stop container
-docker rmi $(docker compose config | grep image: | awk '{print $2}')  # Remove image
-rm -f .env .env.runtime docker-compose.yml             # Remove config
-```
-
----
-
-## Network Requirements
-
-Outbound HTTPS (TCP/443) to:
-
-| Endpoint | When | Purpose |
-|---|---|---|
-| `auth.apps.paloaltonetworks.com` | Always | OAuth2 authentication |
-| `api.sase.paloaltonetworks.com` | Always | API (channels, registry credentials, stats) |
-| `registry.ai-red-teaming.paloaltonetworks.com` | Setup/Update | Image pull (US) |
-| `registry-nl.ai-red-teaming.paloaltonetworks.com` | Setup/Update | Image pull (Europe) |
-| `registry-sg.ai-red-teaming.paloaltonetworks.com` | Setup/Update | Image pull (Asia Pacific) |
-
-Only one registry is needed, based on your selected region.
-
-### Proxy Support
-
-Add to `.env`:
-
-```env
-HTTP_PROXY="http://proxy.example.com:8080"
-HTTPS_PROXY="http://proxy.example.com:8080"
-NO_PROXY="localhost,127.0.0.1"
-```
-
----
-
-## Troubleshooting
-
-Run `./setup-panw-network-client.sh --diagnose` for automated analysis, or check manually:
-
-| Problem | Likely Cause | Fix |
-|---|---|---|
-| `Authentication failed` | Bad CLIENT_ID/CLIENT_SECRET | Verify credentials in portal |
-| `Could not extract TSG ID` | CLIENT_ID format unexpected | Set `TSG_ID` explicitly in `.env` |
-| `Could not fetch registry credentials` | API endpoint unreachable | Check network, set `REGISTRY_TOKEN` manually |
-| `Could not discover image` | Stats API unavailable | Set `IMAGE_PATH` in `.env` |
-| `Docker login failed` | Bad registry credentials | Re-run `--init` to refresh token |
-| Container exits immediately | Bad credentials or channel | Check `docker compose logs panw-network-client` |
-| Channel stays "Offline" | Network or credential issue | Run `--diagnose` to identify the cause |
-| `docker compose` not found | Compose not installed | Install: `apt install docker-compose-plugin` |
-
----
-
-## Backwards Compatibility
-
-If you have an existing `.env` from a previous version (with `TENANT_PATH`, `REGISTRY_HOST`, etc.), the script auto-migrates it:
-- Derives `REGION` from `REGISTRY_HOST`
-- Uses `REGISTRY_USERNAME` as `TSG_ID`
-- Saves old `.env` as `.env.old`
-
----
-
-## Migration to Kubernetes
-
-When your team is ready to move to Kubernetes, the mapping is straightforward:
-
-| Docker Compose | Kubernetes |
-|---|---|
-| `.env.runtime` | Secret + ConfigMap |
-| `docker-compose.yml` image | Helm `values.yaml` image override |
-| `docker-compose.yml` security | Pod Security Context |
-| `docker-compose.yml` limits | Resource requests/limits |
-| `healthcheck` | Liveness/readiness probes |
-
-The runtime tunables in `.env.runtime` use the same names as the Helm chart's `values.yaml`, so configuration carries over directly.
-
----
+- **[Reference](docs/reference.md)** — CLI modes, tunables, overrides, operations, K8s migration
+- **[Troubleshooting](docs/reference.md#troubleshooting)** — or run `./setup-panw-network-client.sh --diagnose`
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE).
