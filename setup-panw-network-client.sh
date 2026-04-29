@@ -620,7 +620,7 @@ migrate_env_if_needed() {
 
     # Preserve original only on first migration
     if [ ! -f "${ENV_FILE}.old" ]; then
-      cp "$ENV_FILE" "${ENV_FILE}.old"
+      ( umask 077; cp "$ENV_FILE" "${ENV_FILE}.old" )
       chmod 600 "${ENV_FILE}.old"
     fi
 
