@@ -1254,14 +1254,18 @@ do_install() {
   local DIGEST_FILE="$SCRIPT_DIR/.image-digest"
 
   if [ "$QUIET" = true ]; then
-    docker pull "$FULL_IMAGE" >/dev/null 2>&1 || die "Failed to pull image: $FULL_IMAGE"
+    local pull_err
+    pull_err=$(docker pull "$FULL_IMAGE" 2>&1 >/dev/null) \
+      || die "Failed to pull image: $FULL_IMAGE${pull_err:+ — $pull_err}"
   else
     docker pull "$FULL_IMAGE" || die "Failed to pull image: $FULL_IMAGE"
   fi
 
-  # Get image digest
+  # Get image digest — filter by registry in case the same image was also pulled from another region
   local IMAGE_DIGEST
-  IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$FULL_IMAGE" 2>/dev/null | cut -d@ -f2 || echo "unknown")
+  IMAGE_DIGEST=$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "$FULL_IMAGE" 2>/dev/null \
+    | grep "^${REGISTRY}/" | head -1 | cut -d@ -f2)
+  [ -z "$IMAGE_DIGEST" ] && IMAGE_DIGEST="unknown"
   info "Image digest: $IMAGE_DIGEST"
   log_deploy "image_pulled" "image=$FULL_IMAGE digest=$IMAGE_DIGEST"
 
