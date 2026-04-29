@@ -214,6 +214,15 @@ If the image hasn't changed and the container is already running, it exits early
 3. Deploy: `./setup-panw-network-client.sh`
 4. Verify: `./setup-panw-network-client.sh --validate`
 5. Revoke old credentials in the portal
+6. **Delete stale backups** — remove `.env.old`, `.env.runtime.bak`, and `docker-compose.yml.bak`; they still contain the old secrets:
+   ```bash
+   shred -u .env.old .env.runtime.bak docker-compose.yml.bak 2>/dev/null || rm -f .env.old .env.runtime.bak docker-compose.yml.bak
+   ```
+
+> **Note on backup files**
+> - `.env.old` is created once by the format migration and never auto-deleted.
+> - `.env.runtime.bak` and `docker-compose.yml.bak` are rewritten every install run.
+> - None of these are pruned automatically — rotate them out manually after each credential change to stay compliant with data-minimization (GDPR, SOC 2).
 
 ### Backup
 
