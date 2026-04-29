@@ -376,6 +376,33 @@ api_get_registry_credentials() {
   esac
 }
 
+# Returns 0 when REGISTRY_TOKEN is missing, has no expiry, or expires within 24h.
+# Relies on lexicographic ordering of ISO 8601 UTC timestamps.
+registry_token_needs_refresh() {
+  [ -z "${REGISTRY_TOKEN:-}" ] && return 0
+  [ -z "${REGISTRY_TOKEN_EXPIRY:-}" ] && return 0
+  local threshold
+  threshold=$(date -u -d '+1 day' +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null) \
+    || threshold=$(date -u -v+1d +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null) \
+    || return 1
+  [[ "$REGISTRY_TOKEN_EXPIRY" < "$threshold" ]]
+}
+
+# Rewrite REGISTRY_TOKEN / REGISTRY_TOKEN_EXPIRY in .env atomically.
+persist_registry_token() {
+  local token="$1" expiry="${2:-}" tmp
+  [ -f "$ENV_FILE" ] || return 1
+  tmp=$(mktemp "${ENV_FILE}.XXXXXX") || return 1
+  chmod 600 "$tmp"
+  ( umask 077
+    grep -v -E '^[[:space:]]*(REGISTRY_TOKEN|REGISTRY_TOKEN_EXPIRY)=' "$ENV_FILE" > "$tmp" || true
+    printf 'REGISTRY_TOKEN="%s"\n' "$token" >> "$tmp"
+    [ -n "$expiry" ] && printf 'REGISTRY_TOKEN_EXPIRY="%s"\n' "$expiry" >> "$tmp"
+  )
+  mv "$tmp" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+}
+
 # Print channel status from the API. Args: format = "verbose"|"compact"
 api_print_channel_status() {
   local format="${1:-verbose}"
@@ -1160,13 +1187,17 @@ do_install() {
   fi
   success "Authenticated."
 
-  # Refresh registry token if expired or missing
+  # Refresh registry token if missing, expired, or within 24h of expiry
   local REGISTRY_PASSWORD="${REGISTRY_TOKEN:-}"
-  if [ -z "$REGISTRY_PASSWORD" ]; then
-    info "Fetching registry credentials..."
-    local reg_response
+  if registry_token_needs_refresh; then
+    [ -n "${REGISTRY_TOKEN:-}" ] \
+      && info "Registry token is expired or near expiry. Refreshing..." \
+      || info "Fetching registry credentials..."
+    local reg_response reg_expiry
     reg_response=$(api_get_registry_credentials 2>/dev/null) || die "Could not fetch registry credentials. Set REGISTRY_TOKEN in .env."
     REGISTRY_PASSWORD=$(printf '%s' "$reg_response" | json_extract '.token') || die "Invalid registry credentials response."
+    reg_expiry=$(printf '%s' "$reg_response" | json_extract '.expiry') || reg_expiry=""
+    persist_registry_token "$REGISTRY_PASSWORD" "$reg_expiry" || warn "Could not persist refreshed registry token to .env"
     success "Registry credentials obtained."
   fi
 
