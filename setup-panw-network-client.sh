@@ -1365,11 +1365,18 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 1"]
+      test:
+        - CMD-SHELL
+        - |
+          set -u
+          kill -0 1 2>/dev/null || exit 1
+          grep -q '^State:[[:space:]]*Z' /proc/1/status 2>/dev/null && exit 1
+          est=\$\$(awk 'NR>1 && \$\$4=="01" && \$\$2 !~ /^0100007F:/ {n++} END{print n+0}' /proc/net/tcp /proc/net/tcp6 2>/dev/null)
+          [ "\$\${est:-0}" -ge 1 ]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 60s
 EOF
 
   success "docker-compose.yml created."
