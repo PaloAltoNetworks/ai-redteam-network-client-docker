@@ -1341,10 +1341,17 @@ do_install() {
   # --- Step 5: Generate docker-compose.yml ---
   step "5" "Creating docker-compose.yml"
 
+  # Pin image by digest when known so `compose up` cannot pick up a mutated tag.
+  local COMPOSE_IMAGE="$FULL_IMAGE"
+  if [ "$IMAGE_DIGEST" != "unknown" ]; then
+    COMPOSE_IMAGE="${FULL_IMAGE%:*}@${IMAGE_DIGEST}"
+  fi
+
   cat > "$SCRIPT_DIR/docker-compose.yml" <<EOF
 services:
   panw-network-client:
-    image: "${FULL_IMAGE}"
+    # tag for reference: ${FULL_IMAGE}
+    image: "${COMPOSE_IMAGE}"
     command: ["/app/client"]
     env_file:
       - .env.runtime
