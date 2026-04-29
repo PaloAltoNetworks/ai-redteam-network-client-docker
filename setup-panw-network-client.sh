@@ -763,10 +763,10 @@ do_init() {
       printf 'CLIENT_SECRET="%s"\n' "${SA_CLIENT_SECRET//\"/\\\"}"
       printf 'TSG_ID="%s"\n' "${SA_TSG_ID//\"/\\\"}"
       printf 'CHANNEL_ID="%s"\n' "${CHANNEL_ID//\"/\\\"}"
-      [ -n "$CHANNEL_NAME" ] && printf 'CHANNEL_NAME="%s"\n' "${CHANNEL_NAME//\"/\\\"}"
+      if [ -n "$CHANNEL_NAME" ]; then printf 'CHANNEL_NAME="%s"\n' "${CHANNEL_NAME//\"/\\\"}"; fi
       printf 'REGION="%s"\n' "${REGION//\"/\\\"}"
       printf 'REGISTRY_TOKEN="%s"\n' "${REG_TOKEN//\"/\\\"}"
-      [ -n "$REG_EXPIRY" ] && printf 'REGISTRY_TOKEN_EXPIRY="%s"\n' "${REG_EXPIRY//\"/\\\"}"
+      if [ -n "$REG_EXPIRY" ]; then printf 'REGISTRY_TOKEN_EXPIRY="%s"\n' "${REG_EXPIRY//\"/\\\"}"; fi
     } > "$ENV_FILE"
   )
   chmod 600 "$ENV_FILE"
@@ -1342,9 +1342,9 @@ do_install() {
       printf 'POOL_SIZE="%s"\n' "${POOL_SIZE//\"/\\\"}"
       printf 'RE_AUTH_INTERVAL="%s"\n' "${RE_AUTH_INTERVAL//\"/\\\"}"
       printf 'DISABLE_SSL_VERIFICATION="%s"\n' "${DISABLE_SSL_VERIFICATION//\"/\\\"}"
-      [ -n "${HTTP_PROXY:-}" ]  && printf 'HTTP_PROXY="%s"\n' "${HTTP_PROXY//\"/\\\"}"
-      [ -n "${HTTPS_PROXY:-}" ] && printf 'HTTPS_PROXY="%s"\n' "${HTTPS_PROXY//\"/\\\"}"
-      [ -n "${NO_PROXY:-}" ]    && printf 'NO_PROXY="%s"\n' "${NO_PROXY//\"/\\\"}"
+      if [ -n "${HTTP_PROXY:-}" ];  then printf 'HTTP_PROXY="%s"\n'  "${HTTP_PROXY//\"/\\\"}";  fi
+      if [ -n "${HTTPS_PROXY:-}" ]; then printf 'HTTPS_PROXY="%s"\n' "${HTTPS_PROXY//\"/\\\"}"; fi
+      if [ -n "${NO_PROXY:-}" ];    then printf 'NO_PROXY="%s"\n'    "${NO_PROXY//\"/\\\"}";    fi
     } > "${SCRIPT_DIR}/.env.runtime"
   )
   chmod 600 "${SCRIPT_DIR}/.env.runtime"
