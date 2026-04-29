@@ -151,9 +151,9 @@ detect_compose() {
 # API Layer — OAuth2 auth + Network Broker REST API
 # =============================================================================
 
-API_BASE="https://api.sase.paloaltonetworks.com/ai-red-teaming/data-plane/network-broker"
-MGMT_API_BASE="https://api.sase.paloaltonetworks.com/ai-red-teaming/mgmt-plane"
-AUTH_ENDPOINT="https://auth.apps.paloaltonetworks.com/oauth2/access_token"
+API_BASE="${PANW_API_BASE:-https://api.sase.paloaltonetworks.com/ai-red-teaming/data-plane/network-broker}"
+MGMT_API_BASE="${PANW_MGMT_API_BASE:-https://api.sase.paloaltonetworks.com/ai-red-teaming/mgmt-plane}"
+AUTH_ENDPOINT="${PANW_AUTH_ENDPOINT:-https://auth.apps.paloaltonetworks.com/oauth2/access_token}"
 API_TOKEN=""
 API_TOKEN_EXPIRY=0
 API_AVAILABLE=false
