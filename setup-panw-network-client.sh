@@ -327,17 +327,10 @@ api_list_channels() {
 api_create_channel() {
   local name="$1"
   local desc="${2:-}"
-  # Escape quotes and backslashes for safe JSON
-  name="${name//\\/\\\\}"
-  name="${name//\"/\\\"}"
   local body
-  if [ -n "$desc" ]; then
-    desc="${desc//\\/\\\\}"
-    desc="${desc//\"/\\\"}"
-    body=$(printf '{"name":"%s","description":"%s"}' "$name" "$desc")
-  else
-    body=$(printf '{"name":"%s"}' "$name")
-  fi
+  body=$(jq -cn --arg name "$name" --arg desc "$desc" \
+    'if $desc == "" then {name:$name} else {name:$name, description:$desc} end') \
+    || return 1
   api_call "POST" "/v1/channels" "$body"
 }
 
