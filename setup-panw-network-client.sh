@@ -499,6 +499,14 @@ prompt_channel_id() {
   [ -z "$CHANNEL_ID" ] && die "Channel ID cannot be empty."
   validate_uuid "$CHANNEL_ID" || die "Invalid channel ID format (expected UUID)."
   CHANNEL_NAME=""
+
+  # Best-effort: confirm the channel exists on this tenant before committing
+  if [ "$API_AVAILABLE" = true ]; then
+    local ch_info
+    ch_info=$(api_get_channel "$CHANNEL_ID" 2>/dev/null) \
+      || die "Channel ID not found on this tenant. Check the portal or run --init to pick from the list."
+    CHANNEL_NAME=$(printf '%s' "$ch_info" | json_extract '.name') || CHANNEL_NAME=""
+  fi
 }
 
 # --- Region / Registry ---
