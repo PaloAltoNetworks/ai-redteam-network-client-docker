@@ -884,6 +884,8 @@ do_init() {
   info "You only need your service account credentials from the portal."
   echo ""
 
+  preflight "init"
+
   if [ -f "$ENV_FILE" ]; then
     warn ".env file already exists at $ENV_FILE"
     printf "  Overwrite? [y/N] "
@@ -1291,11 +1293,8 @@ preflight() {
 
   local failed=false
 
-  # Docker
-  if ! command -v docker &>/dev/null; then
-    error "docker is not installed. Install: https://docs.docker.com/get-docker/"
-    failed=true
-  elif ! docker info &>/dev/null 2>&1; then
+  # Docker daemon health + version (presence checked earlier in require_basics)
+  if ! docker info &>/dev/null 2>&1; then
     error "Docker daemon is not running or not accessible."
     failed=true
   else
@@ -1310,31 +1309,7 @@ preflight() {
     fi
   fi
 
-  # Docker Compose
-  local COMPOSE
-  COMPOSE=$(detect_compose)
-  if [ -z "$COMPOSE" ]; then
-    error "Docker Compose not found. Install: https://docs.docker.com/compose/install/"
-    failed=true
-  else
-    success "Docker Compose ($COMPOSE)"
-  fi
-
-  # curl
-  if ! command -v curl &>/dev/null; then
-    error "curl is not installed."
-    failed=true
-  else
-    success "curl"
-  fi
-
-  # jq
-  if ! command -v jq &>/dev/null; then
-    error "jq is not installed. Install: https://jqlang.github.io/jq/download/"
-    failed=true
-  else
-    success "jq"
-  fi
+  success "Docker Compose ($(detect_compose))"
 
   # Network connectivity (only for install)
   if [ "$label" = "install" ]; then
