@@ -803,9 +803,29 @@ select_image_version() {
   local_tags=$(list_local_tags "$REGISTRY" "$repo")
   running=$(running_image_tag)
 
+  # Build deploy-history line: prefer live container start time, fall back to deploy.log.
+  local _deploy_line=""
+  if [ -n "$running" ]; then
+    local _cid _created
+    _cid=$(docker ps --filter "name=panw-network-client" --format '{{.ID}}' 2>/dev/null | head -1)
+    if [ -n "$_cid" ]; then
+      _created=$(docker inspect --format '{{.Created}}' "$_cid" 2>/dev/null | sed 's/\..*//')
+      _deploy_line="Currently running: $running (started $_created)"
+    fi
+  elif [ -f "$DEPLOY_LOG" ]; then
+    local last_install ts user img
+    last_install=$(grep ' action=install ' "$DEPLOY_LOG" 2>/dev/null | tail -1)
+    if [ -n "$last_install" ]; then
+      ts=$(printf '%s' "$last_install" | sed -nE 's/^\[([^]]+)\].*/\1/p')
+      user=$(printf '%s' "$last_install" | sed -nE 's/.* user=([^ ]+).*/\1/p')
+      img=$(printf '%s' "$last_install" | sed -nE 's/.* image=([^ ]+).*/\1/p')
+      [ -n "$ts" ] && _deploy_line="Last deploy: $ts by $user (image=${img##*:})"
+    fi
+  fi
+
   echo ""
-  info "Latest (from API):  $latest"
-  [ -n "$running" ] && info "Currently running:  $running"
+  info "Latest (from API): $latest"
+  [ -n "$_deploy_line" ] && info "$_deploy_line"
   info "Available versions:"
   local i=1 tag choice
   local -a tag_arr=()
