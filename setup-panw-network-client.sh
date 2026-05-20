@@ -864,6 +864,8 @@ do_init() {
   info "You only need your service account credentials from the portal."
   echo ""
 
+  preflight "init"
+
   if [ -f "$ENV_FILE" ]; then
     warn ".env file already exists at $ENV_FILE"
     printf "  Overwrite? [y/N] "
