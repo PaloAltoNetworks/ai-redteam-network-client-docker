@@ -15,6 +15,10 @@ Full configuration, operations, and migration guide for the PANW AI Red Teaming 
 | `./setup-panw-network-client.sh --validate` | Verify the channel is connected |
 | `./setup-panw-network-client.sh --diagnose` | Analyze container logs for common issues |
 | `./setup-panw-network-client.sh --quiet` | Suppress info/success output (errors and warnings only) — for CI/automation |
+| `./setup-panw-network-client.sh --list-versions` | List available image tags from the registry and exit |
+| `./setup-panw-network-client.sh --version TAG` | Pin a specific image tag (e.g. `1.2.1`). Skips API recommendation |
+| `./setup-panw-network-client.sh --yes` | Non-interactive: accept API-recommended version without prompt |
+| `./setup-panw-network-client.sh --script-version` | Print the script version (`-v` short form) and exit |
 
 ### Interactive Setup (`--init`)
 
@@ -53,6 +57,14 @@ Pattern-matches container logs against:
 | **OS** | Linux (x86_64, aarch64) or macOS (Intel, Apple Silicon) |
 | **Tools** | `curl`, `jq` |
 | **Network** | Outbound HTTPS to `*.paloaltonetworks.com` |
+
+The script checks `jq`, `curl`, `docker`, and `docker compose` at startup before any mode runs. If any are missing it exits with `Missing required dependencies: <list>` so a missing dependency cannot surface later as an opaque auth error.
+
+On Ubuntu:
+
+```bash
+sudo apt-get update && sudo apt-get install -y git curl jq docker.io docker-compose-v2
+```
 
 You need a [service account](https://docs.paloaltonetworks.com/common-services/identity-and-access-access-management/manage-identity-and-access/add-service-accounts) (Client ID + Client Secret). No need to pre-create a channel.
 
