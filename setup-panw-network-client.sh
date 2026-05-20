@@ -160,16 +160,15 @@ detect_compose() {
   fi
 }
 
-# --- Early dependency gate (runs before any mode) ---
-# Every external CLI the script depends on. Full preflight (daemon health,
-# Docker version, network reachability) still runs in per-mode preflight.
+# --- Early dependency gate (runs before any operational mode) ---
+# Tools required by every mode that talks to the API or parses JSON.
+# Docker and Docker Compose are checked by per-mode preflight, so --init can
+# still generate .env on a host that does not run the container itself.
 
 require_basics() {
   local missing=()
-  command -v jq     &>/dev/null || missing+=("jq")
-  command -v curl   &>/dev/null || missing+=("curl")
-  command -v docker &>/dev/null || missing+=("docker")
-  [ -n "$(detect_compose)" ]    || missing+=("docker compose")
+  command -v jq   &>/dev/null || missing+=("jq")
+  command -v curl &>/dev/null || missing+=("curl")
   if [ ${#missing[@]} -gt 0 ]; then
     error "Missing required dependencies: ${missing[*]}"
     error "Install them and re-run."
@@ -1293,8 +1292,11 @@ preflight() {
 
   local failed=false
 
-  # Docker daemon health + version (presence checked earlier in require_basics)
-  if ! docker info &>/dev/null 2>&1; then
+  # Docker presence + daemon health + version
+  if ! command -v docker &>/dev/null; then
+    error "docker is not installed."
+    failed=true
+  elif ! docker info &>/dev/null 2>&1; then
     error "Docker daemon is not running or not accessible."
     failed=true
   else
@@ -1309,10 +1311,18 @@ preflight() {
     fi
   fi
 
-  success "Docker Compose ($(detect_compose))"
+  # Docker Compose presence
+  local compose
+  compose="$(detect_compose)"
+  if [ -z "$compose" ]; then
+    error "Docker Compose not found."
+    failed=true
+  else
+    success "Docker Compose ($compose)"
+  fi
 
-  # Network connectivity (only for install)
-  if [ "$label" = "install" ]; then
+  # Network reachability — needed by both --init (OAuth + REST) and --install
+  if [ "$label" = "install" ] || [ "$label" = "init" ]; then
     local code
     code=$(curl -so /dev/null --max-time 5 -w "%{http_code}" "https://api.sase.paloaltonetworks.com" 2>/dev/null || echo "000")
     if [ "$code" != "000" ]; then

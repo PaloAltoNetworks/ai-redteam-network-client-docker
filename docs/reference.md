@@ -58,7 +58,7 @@ Pattern-matches container logs against:
 | **Tools** | `curl`, `jq` |
 | **Network** | Outbound HTTPS to `*.paloaltonetworks.com` |
 
-The script checks `jq`, `curl`, `docker`, and `docker compose` at startup before any mode runs. If any are missing it exits with `Missing required dependencies: <list>` so a missing dependency cannot surface later as an opaque auth error.
+Before any operational mode runs, the script checks `jq` and `curl` and exits with `Missing required dependencies: <list>` if either is missing, so a missing dependency cannot surface later as an opaque auth error. Docker and Docker Compose are checked by per-mode preflight, so `--init` can still generate `.env` on a host that does not run the container itself.
 
 On Ubuntu:
 
