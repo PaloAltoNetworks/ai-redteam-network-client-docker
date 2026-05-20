@@ -32,6 +32,7 @@ set -euo pipefail
 
 # --- Constants ---
 
+SCRIPT_VERSION="0.1.0"
 REGISTRY_DEFAULT="registry.ai-red-teaming.paloaltonetworks.com"
 REGISTRY="$REGISTRY_DEFAULT"
 KNOWN_REGISTRIES=(
@@ -82,16 +83,17 @@ Usage:
   ./setup-panw-network-client.sh [OPTIONS]
 
 Options:
-  --init            Interactive guided setup (creates .env from portal values)
-  --dry-run         Show what would happen without making changes
-  --status          Check current deployment state
-  --validate        Verify the channel is connected after setup
-  --diagnose        Analyze container logs for common issues
-  --version TAG     Use specific image tag (e.g. 1.2.1). Skips API recommendation.
-  --list-versions   List available image tags from registry and exit
-  --yes, -y         Non-interactive: accept API-recommended version without prompt
-  --quiet, -q       Suppress info/success output (errors and warnings only)
-  --help            Show this help message
+  --init                Interactive guided setup (creates .env from portal values)
+  --dry-run             Show what would happen without making changes
+  --status              Check current deployment state
+  --validate            Verify the channel is connected after setup
+  --diagnose            Analyze container logs for common issues
+  --version TAG         Use specific image tag (e.g. 1.2.1). Skips API recommendation.
+  --list-versions       List available image tags from registry and exit
+  --yes, -y             Non-interactive: accept API-recommended version without prompt
+  --quiet, -q           Suppress info/success output (errors and warnings only)
+  --script-version, -v  Print this script's version and exit
+  --help, -h            Show this help message
 
 Quick Start:
   1. ./setup-panw-network-client.sh --init
@@ -121,6 +123,7 @@ while [ $# -gt 0 ]; do
     --version=*)      VERSION_OVERRIDE="${1#--version=}"; shift ;;
     --yes|-y)         ASSUME_YES=true; shift ;;
     --quiet|-q)       QUIET=true; shift ;;
+    --script-version|-v) printf '%s\n' "$SCRIPT_VERSION"; exit 0 ;;
     --help|-h)        usage ;;
     *)                error "Unknown option: $1"; exit 1 ;;
   esac
