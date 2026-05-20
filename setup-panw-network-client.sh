@@ -877,6 +877,7 @@ do_init() {
   echo ""
   printf "${BOLD}=============================================${NC}\n"
   printf "${BOLD} Palo Alto Network Client - Interactive Setup${NC}\n"
+  printf "${BOLD} v%s${NC}\n" "$SCRIPT_VERSION"
   printf "${BOLD}=============================================${NC}\n"
   echo ""
   info "This will guide you through creating your .env file."
@@ -1289,8 +1290,19 @@ do_diagnose() {
 preflight() {
   local label="$1"
   info "Running preflight checks..."
+  info "Script version: $SCRIPT_VERSION"
 
   local failed=false
+
+  # jq version (presence enforced by require_basics)
+  local jq_ver
+  jq_ver=$(jq --version 2>/dev/null | sed 's/^jq-//' || echo "unknown")
+  success "jq $jq_ver"
+
+  # curl version (presence enforced by require_basics)
+  local curl_ver
+  curl_ver=$(curl --version 2>/dev/null | head -n1 | awk '{print $2}' || echo "unknown")
+  success "curl $curl_ver"
 
   # Docker presence + daemon health + version
   if ! command -v docker &>/dev/null; then
@@ -1311,14 +1323,16 @@ preflight() {
     fi
   fi
 
-  # Docker Compose presence
+  # Docker Compose presence + version
   local compose
   compose="$(detect_compose)"
   if [ -z "$compose" ]; then
     error "Docker Compose not found."
     failed=true
   else
-    success "Docker Compose ($compose)"
+    local compose_ver
+    compose_ver=$($compose version --short 2>/dev/null || echo "unknown")
+    success "Docker Compose $compose_ver ($compose)"
   fi
 
   # Network reachability — needed by both --init (OAuth + REST) and --install
@@ -1408,6 +1422,7 @@ do_install() {
     echo ""
     printf "${BOLD}=============================================${NC}\n"
     printf "${BOLD} Palo Alto Network Client - Docker Installer${NC}\n"
+    printf "${BOLD} v%s${NC}\n" "$SCRIPT_VERSION"
     printf "${BOLD}=============================================${NC}\n"
     echo ""
   fi
