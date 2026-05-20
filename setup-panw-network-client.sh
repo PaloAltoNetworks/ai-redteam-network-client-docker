@@ -32,6 +32,7 @@ set -euo pipefail
 
 # --- Constants ---
 
+SCRIPT_VERSION="0.1.0"
 REGISTRY_DEFAULT="registry.ai-red-teaming.paloaltonetworks.com"
 REGISTRY="$REGISTRY_DEFAULT"
 KNOWN_REGISTRIES=(
@@ -82,16 +83,17 @@ Usage:
   ./setup-panw-network-client.sh [OPTIONS]
 
 Options:
-  --init            Interactive guided setup (creates .env from portal values)
-  --dry-run         Show what would happen without making changes
-  --status          Check current deployment state
-  --validate        Verify the channel is connected after setup
-  --diagnose        Analyze container logs for common issues
-  --version TAG     Use specific image tag (e.g. 1.2.1). Skips API recommendation.
-  --list-versions   List available image tags from registry and exit
-  --yes, -y         Non-interactive: accept API-recommended version without prompt
-  --quiet, -q       Suppress info/success output (errors and warnings only)
-  --help            Show this help message
+  --init                Interactive guided setup (creates .env from portal values)
+  --dry-run             Show what would happen without making changes
+  --status              Check current deployment state
+  --validate            Verify the channel is connected after setup
+  --diagnose            Analyze container logs for common issues
+  --version TAG         Use specific image tag (e.g. 1.2.1). Skips API recommendation.
+  --list-versions       List available image tags from registry and exit
+  --yes, -y             Non-interactive: accept API-recommended version without prompt
+  --quiet, -q           Suppress info/success output (errors and warnings only)
+  --script-version, -v  Print this script's version and exit
+  --help, -h            Show this help message
 
 Quick Start:
   1. ./setup-panw-network-client.sh --init
@@ -121,6 +123,7 @@ while [ $# -gt 0 ]; do
     --version=*)      VERSION_OVERRIDE="${1#--version=}"; shift ;;
     --yes|-y)         ASSUME_YES=true; shift ;;
     --quiet|-q)       QUIET=true; shift ;;
+    --script-version|-v) printf '%s\n' "$SCRIPT_VERSION"; exit 0 ;;
     --help|-h)        usage ;;
     *)                error "Unknown option: $1"; exit 1 ;;
   esac
@@ -154,6 +157,22 @@ detect_compose() {
     echo "docker-compose"
   else
     echo ""
+  fi
+}
+
+# --- Early dependency gate (runs before any operational mode) ---
+# Tools required by every mode that talks to the API or parses JSON.
+# Docker and Docker Compose are checked by per-mode preflight, so --init can
+# still generate .env on a host that does not run the container itself.
+
+require_basics() {
+  local missing=()
+  command -v jq   &>/dev/null || missing+=("jq")
+  command -v curl &>/dev/null || missing+=("curl")
+  if [ ${#missing[@]} -gt 0 ]; then
+    error "Missing required dependencies: ${missing[*]}"
+    error "Install them and re-run."
+    exit 1
   fi
 }
 
@@ -858,11 +877,14 @@ do_init() {
   echo ""
   printf "${BOLD}=============================================${NC}\n"
   printf "${BOLD} Palo Alto Network Client - Interactive Setup${NC}\n"
+  printf "${BOLD} v%s${NC}\n" "$SCRIPT_VERSION"
   printf "${BOLD}=============================================${NC}\n"
   echo ""
   info "This will guide you through creating your .env file."
   info "You only need your service account credentials from the portal."
   echo ""
+
+  preflight "init"
 
   if [ -f "$ENV_FILE" ]; then
     warn ".env file already exists at $ENV_FILE"
@@ -1268,12 +1290,23 @@ do_diagnose() {
 preflight() {
   local label="$1"
   info "Running preflight checks..."
+  info "Script version: $SCRIPT_VERSION"
 
   local failed=false
 
-  # Docker
+  # jq version (presence enforced by require_basics)
+  local jq_ver
+  jq_ver=$(jq --version 2>/dev/null | sed 's/^jq-//' || echo "unknown")
+  success "jq $jq_ver"
+
+  # curl version (presence enforced by require_basics)
+  local curl_ver
+  curl_ver=$(curl --version 2>/dev/null | head -n1 | awk '{print $2}' || echo "unknown")
+  success "curl $curl_ver"
+
+  # Docker presence + daemon health + version
   if ! command -v docker &>/dev/null; then
-    error "docker is not installed. Install: https://docs.docker.com/get-docker/"
+    error "docker is not installed."
     failed=true
   elif ! docker info &>/dev/null 2>&1; then
     error "Docker daemon is not running or not accessible."
@@ -1290,34 +1323,20 @@ preflight() {
     fi
   fi
 
-  # Docker Compose
-  local COMPOSE
-  COMPOSE=$(detect_compose)
-  if [ -z "$COMPOSE" ]; then
-    error "Docker Compose not found. Install: https://docs.docker.com/compose/install/"
+  # Docker Compose presence + version
+  local compose
+  compose="$(detect_compose)"
+  if [ -z "$compose" ]; then
+    error "Docker Compose not found."
     failed=true
   else
-    success "Docker Compose ($COMPOSE)"
+    local compose_ver
+    compose_ver=$($compose version --short 2>/dev/null || echo "unknown")
+    success "Docker Compose $compose_ver ($compose)"
   fi
 
-  # curl
-  if ! command -v curl &>/dev/null; then
-    error "curl is not installed."
-    failed=true
-  else
-    success "curl"
-  fi
-
-  # jq
-  if ! command -v jq &>/dev/null; then
-    error "jq is not installed. Install: https://jqlang.github.io/jq/download/"
-    failed=true
-  else
-    success "jq"
-  fi
-
-  # Network connectivity (only for install)
-  if [ "$label" = "install" ]; then
+  # Network reachability — needed by both --init (OAuth + REST) and --install
+  if [ "$label" = "install" ] || [ "$label" = "init" ]; then
     local code
     code=$(curl -so /dev/null --max-time 5 -w "%{http_code}" "https://api.sase.paloaltonetworks.com" 2>/dev/null || echo "000")
     if [ "$code" != "000" ]; then
@@ -1403,6 +1422,7 @@ do_install() {
     echo ""
     printf "${BOLD}=============================================${NC}\n"
     printf "${BOLD} Palo Alto Network Client - Docker Installer${NC}\n"
+    printf "${BOLD} v%s${NC}\n" "$SCRIPT_VERSION"
     printf "${BOLD}=============================================${NC}\n"
     echo ""
   fi
@@ -1770,6 +1790,8 @@ fi
 # =============================================================================
 # Main dispatch
 # =============================================================================
+
+require_basics
 
 case "$MODE" in
   init)           do_init ;;
