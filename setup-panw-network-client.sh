@@ -145,6 +145,21 @@ load_env() {
   done < "$file"
 }
 
+# --- Early dependency gate (runs before any mode) ---
+# Bare-minimum CLI tools the script cannot work without. Full preflight
+# (docker, compose, network) still runs per-mode where relevant.
+
+require_basics() {
+  local missing=()
+  command -v jq   &>/dev/null || missing+=("jq")
+  command -v curl &>/dev/null || missing+=("curl")
+  if [ ${#missing[@]} -gt 0 ]; then
+    error "Missing required dependencies: ${missing[*]}"
+    error "Install them and re-run."
+    exit 1
+  fi
+}
+
 # --- Detect docker compose command ---
 
 detect_compose() {
@@ -1770,6 +1785,8 @@ fi
 # =============================================================================
 # Main dispatch
 # =============================================================================
+
+require_basics
 
 case "$MODE" in
   init)           do_init ;;
