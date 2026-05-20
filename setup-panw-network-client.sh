@@ -1570,6 +1570,21 @@ do_install() {
 
   local DIGEST_FILE="$SCRIPT_DIR/.image-digest"
 
+  # Skip the rest of install when the same tag is already running and the image
+  # is in the local Docker store. Avoids a noisy network roundtrip on re-runs.
+  # NOTE: This skips Step 4 (writing .env.runtime / docker-compose.yml). If the
+  # operator changed any tunable in .env (LOG_LEVEL, POOL_SIZE, etc.), they must
+  # run `docker compose down && up -d` separately for the change to land.
+  local _running_tag
+  _running_tag="$(running_image_tag)"
+  if [ -n "$_running_tag" ] && [ "$_running_tag" = "$IMAGE_TAG" ] \
+     && docker image inspect "$FULL_IMAGE" &>/dev/null; then
+    info "Tag $IMAGE_TAG already pulled and running. Skipping pull."
+    info "If you changed .env tunables, run: docker compose down && docker compose up -d"
+    success "Image already present."
+    exit 0
+  fi
+
   if [ "$QUIET" = true ]; then
     local pull_err
     pull_err=$(docker pull "$FULL_IMAGE" 2>&1 >/dev/null) \
