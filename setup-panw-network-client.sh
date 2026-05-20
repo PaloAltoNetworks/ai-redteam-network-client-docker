@@ -157,6 +157,23 @@ detect_compose() {
   fi
 }
 
+# --- Early dependency gate (runs before any mode) ---
+# Every external CLI the script depends on. Full preflight (daemon health,
+# Docker version, network reachability) still runs in per-mode preflight.
+
+require_basics() {
+  local missing=()
+  command -v jq     &>/dev/null || missing+=("jq")
+  command -v curl   &>/dev/null || missing+=("curl")
+  command -v docker &>/dev/null || missing+=("docker")
+  [ -n "$(detect_compose)" ]    || missing+=("docker compose")
+  if [ ${#missing[@]} -gt 0 ]; then
+    error "Missing required dependencies: ${missing[*]}"
+    error "Install them and re-run."
+    exit 1
+  fi
+}
+
 # =============================================================================
 # API Layer — OAuth2 auth + Network Broker REST API
 # =============================================================================
@@ -1770,6 +1787,8 @@ fi
 # =============================================================================
 # Main dispatch
 # =============================================================================
+
+require_basics
 
 case "$MODE" in
   init)           do_init ;;
