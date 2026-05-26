@@ -90,7 +90,7 @@ Options:
   --diagnose            Analyze container logs for common issues
   --version TAG         Use specific image tag (e.g. 1.2.1). Skips API recommendation.
   --list-versions       List available image tags from registry and exit
-  --yes, -y             Non-interactive: accept API-recommended version without prompt
+  --yes, -y             Non-interactive: accept latest version without prompt
   --quiet, -q           Suppress info/success output (errors and warnings only)
   --script-version, -v  Print this script's version and exit
   --help, -h            Show this help message
@@ -763,24 +763,27 @@ running_image_tag() {
   cid=$(docker ps --filter "name=panw-network-client" --format '{{.ID}}' 2>/dev/null | head -1)
   [ -z "$cid" ] && return 0
   img=$(docker inspect --format '{{.Config.Image}}' "$cid" 2>/dev/null) || return 0
-  printf '%s' "${img##*:}"
+  case "$img" in
+    *:*) printf '%s' "${img##*:}" ;;
+    *)   return 0 ;;
+  esac
 }
 
 # Interactive version selection. Uses: VERSION_OVERRIDE, ASSUME_YES, REGISTRY, IMAGE_PATH, TSG_ID, REGISTRY_PASSWORD.
 # Mutates IMAGE_PATH to the selected tag.
 select_image_version() {
   split_image_path "$IMAGE_PATH"
-  local recommended="$IMAGE_TAG"
+  local latest="$IMAGE_TAG"
   local repo="$IMAGE_REPO"
 
   # Explicit --version override: validate against registry then apply
   if [ -n "$VERSION_OVERRIDE" ]; then
     IMAGE_PATH="${repo}:${VERSION_OVERRIDE}"
-    info "Version override: $VERSION_OVERRIDE (recommended was $recommended)"
+    info "Version override: $VERSION_OVERRIDE (latest was $latest)"
     return 0
   fi
 
-  # Non-interactive or -y: accept recommended
+  # Non-interactive or -y: accept latest
   if [ "$ASSUME_YES" = true ] || [ ! -t 0 ]; then
     return 0
   fi
@@ -788,35 +791,30 @@ select_image_version() {
   # Fetch tag list
   local tags
   tags=$(registry_list_tags "$REGISTRY" "$repo" "$TSG_ID" "$REGISTRY_PASSWORD" 2>/dev/null) || {
-    warn "Could not list tags from registry. Using recommended: $recommended"
+    warn "Could not list tags from registry. Using latest: $latest"
     return 0
   }
 
   local sorted
   sorted=$(printf '%s\n' "$tags" | semver_sort_desc)
-  [ -z "$sorted" ] && { warn "No semver tags found. Using recommended: $recommended"; return 0; }
-
-  local latest
-  latest=$(printf '%s\n' "$sorted" | head -1)
+  [ -z "$sorted" ] && { warn "No semver tags found. Using latest: $latest"; return 0; }
 
   local local_tags running
   local_tags=$(list_local_tags "$REGISTRY" "$repo")
   running=$(running_image_tag)
 
   echo ""
-  info "Recommended (from API): $recommended"
-  [ "$latest" != "$recommended" ] && info "Latest in registry:     $latest"
-  [ -n "$running" ] && info "Currently running:      $running"
+  info "Latest (from API):  $latest"
+  [ -n "$running" ] && info "Currently running:  $running"
   info "Available versions:"
   local i=1 tag choice
   local -a tag_arr=()
   while IFS= read -r tag; do
     tag_arr+=("$tag")
     local markers=()
-    [ "$tag" = "$recommended" ] && markers+=("recommended")
-    [ "$tag" = "$latest" ] && [ "$tag" != "$recommended" ] && markers+=("latest")
+    [ "$tag" = "$latest" ] && markers+=("latest")
     [ "$tag" = "$running" ] && markers+=("running")
-    printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("local")
+    printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("pulled")
     local marker="" joined=""
     if [ ${#markers[@]} -gt 0 ]; then
       printf -v joined '%s, ' "${markers[@]}"
@@ -827,12 +825,12 @@ select_image_version() {
     [ "$i" -gt 20 ] && break
   done <<< "$sorted"
 
-  printf "\nSelect version [Enter=recommended %s, or number/tag]: " "$recommended"
+  printf "\nSelect version [Enter=latest %s, or number/tag]: " "$latest"
   read -r choice
 
-  # Empty = recommended
+  # Empty = latest
   if [ -z "$choice" ]; then
-    info "Using recommended: $recommended"
+    info "Using latest: $latest"
     return 0
   fi
 
@@ -844,7 +842,7 @@ select_image_version() {
       info "Selected: ${tag_arr[$idx]}"
       return 0
     fi
-    warn "Invalid selection. Using recommended: $recommended"
+    warn "Invalid selection. Using latest: $latest"
     return 0
   fi
 
@@ -855,7 +853,7 @@ select_image_version() {
     return 0
   fi
 
-  warn "Tag '$choice' not found in registry. Using recommended: $recommended"
+  warn "Tag '$choice' not found in registry. Using latest: $latest"
   return 0
 }
 
@@ -1419,11 +1417,11 @@ do_list_versions() {
 
   discover_image_from_api || die "Could not discover image from API."
   split_image_path "$IMAGE_PATH"
-  local recommended="$IMAGE_TAG" repo="$IMAGE_REPO"
+  local latest="$IMAGE_TAG" repo="$IMAGE_REPO"
 
-  info "Registry:    $REGISTRY"
-  info "Image:       $repo"
-  info "Recommended: $recommended"
+  info "Registry: $REGISTRY"
+  info "Image:    $repo"
+  info "Latest:   $latest"
   echo ""
 
   local tags
@@ -1442,9 +1440,9 @@ do_list_versions() {
   info "Available versions (newest first):"
   while IFS= read -r tag; do
     local markers=()
-    [ "$tag" = "$recommended" ] && markers+=("recommended")
+    [ "$tag" = "$latest" ] && markers+=("latest")
     [ "$tag" = "$running" ] && markers+=("running")
-    printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("local")
+    printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("pulled")
     local marker="" joined=""
     if [ ${#markers[@]} -gt 0 ]; then
       printf -v joined '%s, ' "${markers[@]}"
