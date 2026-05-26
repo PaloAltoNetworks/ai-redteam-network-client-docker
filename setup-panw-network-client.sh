@@ -32,7 +32,7 @@ set -euo pipefail
 
 # --- Constants ---
 
-SCRIPT_VERSION="0.1.0"
+SCRIPT_VERSION="0.1.1"
 REGISTRY_DEFAULT="registry.ai-red-teaming.paloaltonetworks.com"
 REGISTRY="$REGISTRY_DEFAULT"
 KNOWN_REGISTRIES=(
@@ -90,7 +90,8 @@ Options:
   --diagnose            Analyze container logs for common issues
   --version TAG         Use specific image tag (e.g. 1.2.1). Skips API recommendation.
   --list-versions       List available image tags from registry and exit
-  --yes, -y             Non-interactive: accept API-recommended version without prompt
+  --check-update        Print current/latest/action and exit (0=none, 1=upgrade|install, 2=error)
+  --yes, -y             Non-interactive: accept latest version without prompt
   --quiet, -q           Suppress info/success output (errors and warnings only)
   --script-version, -v  Print this script's version and exit
   --help, -h            Show this help message
@@ -118,6 +119,7 @@ while [ $# -gt 0 ]; do
     --validate)       MODE="validate"; shift ;;
     --diagnose)       MODE="diagnose"; shift ;;
     --list-versions)  MODE="list-versions"; shift ;;
+    --check-update)   MODE="check-update"; shift ;;
     --version)        [ -z "${2:-}" ] && { error "--version requires a tag"; exit 1; }
                       VERSION_OVERRIDE="$2"; shift 2 ;;
     --version=*)      VERSION_OVERRIDE="${1#--version=}"; shift ;;
@@ -746,21 +748,47 @@ split_image_path() {
   fi
 }
 
+# List image tags already present in the local Docker store for the given repo.
+# One tag per line. Empty output if nothing pulled or docker unavailable.
+list_local_tags() {
+  local registry="$1" repo="$2"
+  local ref="${registry}/${repo}"
+  command -v docker &>/dev/null || return 0
+  docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
+    | awk -v ref="$ref" -F: '$1==ref && $2!="<none>" {print $2}'
+}
+
+# Print the tag of the running container for this compose project, or empty.
+# Skips digest-only references and bare image IDs by reading RepoTags from the
+# resolved image (works even when Config.Image stores just an ID or sha256 ref).
+running_image_tag() {
+  command -v docker &>/dev/null || return 0
+  local cid img_id tag
+  cid=$(docker ps --filter "name=panw-network-client" --format '{{.ID}}' 2>/dev/null | head -1)
+  [ -z "$cid" ] && return 0
+  img_id=$(docker inspect --format '{{.Image}}' "$cid" 2>/dev/null) || return 0
+  [ -z "$img_id" ] && return 0
+  # Pick the first RepoTag that has a real tag (not <none>).
+  tag=$(docker inspect --format '{{range .RepoTags}}{{println .}}{{end}}' "$img_id" 2>/dev/null \
+    | awk -F: '$2!="" && $2!="<none>" {print $NF; exit}')
+  [ -n "$tag" ] && printf '%s' "$tag"
+}
+
 # Interactive version selection. Uses: VERSION_OVERRIDE, ASSUME_YES, REGISTRY, IMAGE_PATH, TSG_ID, REGISTRY_PASSWORD.
 # Mutates IMAGE_PATH to the selected tag.
 select_image_version() {
   split_image_path "$IMAGE_PATH"
-  local recommended="$IMAGE_TAG"
+  local latest="$IMAGE_TAG"
   local repo="$IMAGE_REPO"
 
   # Explicit --version override: validate against registry then apply
   if [ -n "$VERSION_OVERRIDE" ]; then
     IMAGE_PATH="${repo}:${VERSION_OVERRIDE}"
-    info "Version override: $VERSION_OVERRIDE (recommended was $recommended)"
+    info "Version override: $VERSION_OVERRIDE (latest was $latest)"
     return 0
   fi
 
-  # Non-interactive or -y: accept recommended
+  # Non-interactive or -y: accept latest
   if [ "$ASSUME_YES" = true ] || [ ! -t 0 ]; then
     return 0
   fi
@@ -768,39 +796,66 @@ select_image_version() {
   # Fetch tag list
   local tags
   tags=$(registry_list_tags "$REGISTRY" "$repo" "$TSG_ID" "$REGISTRY_PASSWORD" 2>/dev/null) || {
-    warn "Could not list tags from registry. Using recommended: $recommended"
+    warn "Could not list tags from registry. Using latest: $latest"
     return 0
   }
 
   local sorted
   sorted=$(printf '%s\n' "$tags" | semver_sort_desc)
-  [ -z "$sorted" ] && { warn "No semver tags found. Using recommended: $recommended"; return 0; }
+  [ -z "$sorted" ] && { warn "No semver tags found. Using latest: $latest"; return 0; }
 
-  local latest
-  latest=$(printf '%s\n' "$sorted" | head -1)
+  local local_tags running
+  local_tags=$(list_local_tags "$REGISTRY" "$repo")
+  running=$(running_image_tag)
+
+  # Build deploy-history line: prefer live container start time, fall back to deploy.log.
+  local _deploy_line=""
+  if [ -n "$running" ]; then
+    local _cid _created
+    _cid=$(docker ps --filter "name=panw-network-client" --format '{{.ID}}' 2>/dev/null | head -1)
+    if [ -n "$_cid" ]; then
+      _created=$(docker inspect --format '{{.Created}}' "$_cid" 2>/dev/null | sed 's/\..*//')
+      _deploy_line="Currently running: $running (started $_created)"
+    fi
+  elif [ -f "$DEPLOY_LOG" ]; then
+    local last_install ts user img
+    last_install=$(grep ' action=install ' "$DEPLOY_LOG" 2>/dev/null | tail -1)
+    if [ -n "$last_install" ]; then
+      ts=$(printf '%s' "$last_install" | sed -nE 's/^\[([^]]+)\].*/\1/p')
+      user=$(printf '%s' "$last_install" | sed -nE 's/.* user=([^ ]+).*/\1/p')
+      img=$(printf '%s' "$last_install" | sed -nE 's/.* image=([^ ]+).*/\1/p')
+      [ -n "$ts" ] && _deploy_line="Last deploy: $ts by $user (image=${img##*:})"
+    fi
+  fi
 
   echo ""
-  info "Recommended (from API): $recommended"
-  [ "$latest" != "$recommended" ] && info "Latest in registry:     $latest"
+  info "Latest (from API): $latest"
+  [ -n "$_deploy_line" ] && info "$_deploy_line"
   info "Available versions:"
   local i=1 tag choice
   local -a tag_arr=()
   while IFS= read -r tag; do
     tag_arr+=("$tag")
-    local marker=""
-    [ "$tag" = "$recommended" ] && marker=" (recommended)"
-    [ "$tag" = "$latest" ] && [ "$tag" != "$recommended" ] && marker=" (latest)"
+    local markers=()
+    [ "$tag" = "$latest" ] && markers+=("latest")
+    [ "$tag" = "$running" ] && markers+=("running")
+    printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("pulled")
+    local marker="" joined=""
+    if [ ${#markers[@]} -gt 0 ]; then
+      printf -v joined '%s, ' "${markers[@]}"
+      marker=" (${joined%, })"
+    fi
     printf "  %d) %s%s\n" "$i" "$tag" "$marker"
     i=$((i + 1))
     [ "$i" -gt 20 ] && break
   done <<< "$sorted"
 
-  printf "\nSelect version [Enter=recommended %s, or number/tag]: " "$recommended"
+  printf "\nSelect version [Enter=latest %s, or number/tag]: " "$latest"
   read -r choice
 
-  # Empty = recommended
+  # Empty = latest
   if [ -z "$choice" ]; then
-    info "Using recommended: $recommended"
+    info "Using latest: $latest"
     return 0
   fi
 
@@ -812,7 +867,7 @@ select_image_version() {
       info "Selected: ${tag_arr[$idx]}"
       return 0
     fi
-    warn "Invalid selection. Using recommended: $recommended"
+    warn "Invalid selection. Using latest: $latest"
     return 0
   fi
 
@@ -823,7 +878,7 @@ select_image_version() {
     return 0
   fi
 
-  warn "Tag '$choice' not found in registry. Using recommended: $recommended"
+  warn "Tag '$choice' not found in registry. Using latest: $latest"
   return 0
 }
 
@@ -1387,11 +1442,11 @@ do_list_versions() {
 
   discover_image_from_api || die "Could not discover image from API."
   split_image_path "$IMAGE_PATH"
-  local recommended="$IMAGE_TAG" repo="$IMAGE_REPO"
+  local latest="$IMAGE_TAG" repo="$IMAGE_REPO"
 
-  info "Registry:    $REGISTRY"
-  info "Image:       $repo"
-  info "Recommended: $recommended"
+  info "Registry: $REGISTRY"
+  info "Image:    $repo"
+  info "Latest:   $latest"
   echo ""
 
   local tags
@@ -1402,15 +1457,71 @@ do_list_versions() {
   sorted=$(printf '%s\n' "$tags" | semver_sort_desc)
   [ -z "$sorted" ] && die "No semver-formatted tags found."
 
+  local local_tags running
+  local_tags=$(list_local_tags "$REGISTRY" "$repo")
+  running=$(running_image_tag)
+  [ -n "$running" ] && info "Currently running: $running"
+
   info "Available versions (newest first):"
   while IFS= read -r tag; do
-    local marker=""
-    [ "$tag" = "$recommended" ] && marker=" (recommended)"
+    local markers=()
+    [ "$tag" = "$latest" ] && markers+=("latest")
+    [ "$tag" = "$running" ] && markers+=("running")
+    printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("pulled")
+    local marker="" joined=""
+    if [ ${#markers[@]} -gt 0 ]; then
+      printf -v joined '%s, ' "${markers[@]}"
+      marker=" (${joined%, })"
+    fi
     printf "  - %s%s\n" "$tag" "$marker"
   done <<< "$sorted"
 
   echo ""
   info "Pin a specific version with:  ./setup-panw-network-client.sh --version TAG"
+}
+
+# =============================================================================
+# MODE: --check-update (non-interactive)
+# Prints `current=X latest=Y action=upgrade|none|install`. Exit codes:
+#   0 = up-to-date (action=none)
+#   1 = upgrade available (action=upgrade) or no container yet (action=install)
+#   2 = error (cannot determine — auth, registry, .env, or docker missing)
+# =============================================================================
+
+do_check_update() {
+  [ -f "$ENV_FILE" ] || { echo "error=missing-env"; exit 2; }
+  load_env "$ENV_FILE"
+  migrate_env_if_needed
+
+  if [ -z "${CLIENT_ID:-}" ] || [ -z "${CLIENT_SECRET:-}" ]; then
+    echo "error=missing-credentials"
+    exit 2
+  fi
+  if [ -z "${TSG_ID:-}" ]; then
+    TSG_ID=$(extract_tsg_id "$CLIENT_ID" 2>/dev/null) || { echo "error=tsg-id"; exit 2; }
+  fi
+
+  command -v docker &>/dev/null || { echo "error=docker-missing"; exit 2; }
+
+  resolve_registry
+  api_authenticate || { echo "error=auth"; exit 2; }
+  discover_image_from_api || { echo "error=image-discovery"; exit 2; }
+  split_image_path "$IMAGE_PATH"
+
+  local latest="$IMAGE_TAG"
+  local current
+  current="$(running_image_tag)"
+
+  if [ -z "$current" ]; then
+    printf 'current=none latest=%s action=install\n' "$latest"
+    exit 1
+  fi
+  if [ "$current" = "$latest" ]; then
+    printf 'current=%s latest=%s action=none\n' "$current" "$latest"
+    exit 0
+  fi
+  printf 'current=%s latest=%s action=upgrade\n' "$current" "$latest"
+  exit 1
 }
 
 # =============================================================================
@@ -1500,6 +1611,9 @@ do_install() {
     select_image_version
   fi
 
+  # Re-sync IMAGE_REPO/IMAGE_TAG after selection mutated IMAGE_PATH.
+  split_image_path "$IMAGE_PATH"
+
   local FULL_IMAGE="${REGISTRY}/${IMAGE_PATH}"
   info "Registry: $REGISTRY"
   info "Image:    $FULL_IMAGE"
@@ -1528,7 +1642,28 @@ do_install() {
 
   local DIGEST_FILE="$SCRIPT_DIR/.image-digest"
 
-  if [ "$QUIET" = true ]; then
+  # Two-tier skip when the image is already in the local Docker store:
+  # 1. Same tag already running -> no-op, exit cleanly.
+  # 2. Image cached but a different tag is running -> skip the pull, still write
+  #    config and restart so the new tag takes effect.
+  # NOTE: same-tag skip bypasses Step 4 (writing .env.runtime / docker-compose.yml).
+  # If the operator changed .env tunables, they must run `docker compose down && up -d`.
+  local _running_tag _image_cached=false
+  _running_tag="$(running_image_tag)"
+  if docker image inspect "$FULL_IMAGE" &>/dev/null; then
+    _image_cached=true
+  fi
+
+  if [ "$_image_cached" = true ] && [ -n "$_running_tag" ] && [ "$_running_tag" = "$IMAGE_TAG" ]; then
+    info "Tag $IMAGE_TAG already pulled and running. Nothing to do."
+    info "If you changed .env tunables, run: docker compose down && docker compose up -d"
+    success "Image already present."
+    exit 0
+  fi
+
+  if [ "$_image_cached" = true ]; then
+    info "Tag $IMAGE_TAG already in local Docker store. Skipping pull."
+  elif [ "$QUIET" = true ]; then
     local pull_err
     pull_err=$(docker pull "$FULL_IMAGE" 2>&1 >/dev/null) \
       || die "Failed to pull image: $FULL_IMAGE${pull_err:+ — $pull_err}"
@@ -1558,7 +1693,11 @@ do_install() {
     fi
   fi
 
-  success "Image pulled."
+  if [ "$_image_cached" = true ]; then
+    success "Image ready (cached)."
+  else
+    success "Image pulled."
+  fi
 
   # --- Step 4: Write config files ---
   step "4" "Writing configuration files"
@@ -1799,5 +1938,6 @@ case "$MODE" in
   validate)       do_validate ;;
   diagnose)       do_diagnose ;;
   list-versions)  do_list_versions ;;
+  check-update)   do_check_update ;;
   install)        do_install ;;
 esac
