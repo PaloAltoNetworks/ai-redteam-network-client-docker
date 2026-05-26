@@ -746,6 +746,26 @@ split_image_path() {
   fi
 }
 
+# List image tags already present in the local Docker store for the given repo.
+# One tag per line. Empty output if nothing pulled or docker unavailable.
+list_local_tags() {
+  local registry="$1" repo="$2"
+  local ref="${registry}/${repo}"
+  command -v docker &>/dev/null || return 0
+  docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
+    | awk -v ref="$ref" -F: '$1==ref && $2!="<none>" {print $2}'
+}
+
+# Print the tag of the running container for this compose project, or empty.
+running_image_tag() {
+  command -v docker &>/dev/null || return 0
+  local cid img
+  cid=$(docker ps --filter "name=panw-network-client" --format '{{.ID}}' 2>/dev/null | head -1)
+  [ -z "$cid" ] && return 0
+  img=$(docker inspect --format '{{.Config.Image}}' "$cid" 2>/dev/null) || return 0
+  printf '%s' "${img##*:}"
+}
+
 # Interactive version selection. Uses: VERSION_OVERRIDE, ASSUME_YES, REGISTRY, IMAGE_PATH, TSG_ID, REGISTRY_PASSWORD.
 # Mutates IMAGE_PATH to the selected tag.
 select_image_version() {
@@ -779,17 +799,29 @@ select_image_version() {
   local latest
   latest=$(printf '%s\n' "$sorted" | head -1)
 
+  local local_tags running
+  local_tags=$(list_local_tags "$REGISTRY" "$repo")
+  running=$(running_image_tag)
+
   echo ""
   info "Recommended (from API): $recommended"
   [ "$latest" != "$recommended" ] && info "Latest in registry:     $latest"
+  [ -n "$running" ] && info "Currently running:      $running"
   info "Available versions:"
   local i=1 tag choice
   local -a tag_arr=()
   while IFS= read -r tag; do
     tag_arr+=("$tag")
-    local marker=""
-    [ "$tag" = "$recommended" ] && marker=" (recommended)"
-    [ "$tag" = "$latest" ] && [ "$tag" != "$recommended" ] && marker=" (latest)"
+    local markers=()
+    [ "$tag" = "$recommended" ] && markers+=("recommended")
+    [ "$tag" = "$latest" ] && [ "$tag" != "$recommended" ] && markers+=("latest")
+    [ "$tag" = "$running" ] && markers+=("running")
+    printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("local")
+    local marker="" joined=""
+    if [ ${#markers[@]} -gt 0 ]; then
+      printf -v joined '%s, ' "${markers[@]}"
+      marker=" (${joined%, })"
+    fi
     printf "  %d) %s%s\n" "$i" "$tag" "$marker"
     i=$((i + 1))
     [ "$i" -gt 20 ] && break
@@ -1402,10 +1434,22 @@ do_list_versions() {
   sorted=$(printf '%s\n' "$tags" | semver_sort_desc)
   [ -z "$sorted" ] && die "No semver-formatted tags found."
 
+  local local_tags running
+  local_tags=$(list_local_tags "$REGISTRY" "$repo")
+  running=$(running_image_tag)
+  [ -n "$running" ] && info "Currently running: $running"
+
   info "Available versions (newest first):"
   while IFS= read -r tag; do
-    local marker=""
-    [ "$tag" = "$recommended" ] && marker=" (recommended)"
+    local markers=()
+    [ "$tag" = "$recommended" ] && markers+=("recommended")
+    [ "$tag" = "$running" ] && markers+=("running")
+    printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("local")
+    local marker="" joined=""
+    if [ ${#markers[@]} -gt 0 ]; then
+      printf -v joined '%s, ' "${markers[@]}"
+      marker=" (${joined%, })"
+    fi
     printf "  - %s%s\n" "$tag" "$marker"
   done <<< "$sorted"
 
