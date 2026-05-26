@@ -759,16 +759,19 @@ list_local_tags() {
 }
 
 # Print the tag of the running container for this compose project, or empty.
+# Skips digest-only references and bare image IDs by reading RepoTags from the
+# resolved image (works even when Config.Image stores just an ID or sha256 ref).
 running_image_tag() {
   command -v docker &>/dev/null || return 0
-  local cid img
+  local cid img_id tag
   cid=$(docker ps --filter "name=panw-network-client" --format '{{.ID}}' 2>/dev/null | head -1)
   [ -z "$cid" ] && return 0
-  img=$(docker inspect --format '{{.Config.Image}}' "$cid" 2>/dev/null) || return 0
-  case "$img" in
-    *:*) printf '%s' "${img##*:}" ;;
-    *)   return 0 ;;
-  esac
+  img_id=$(docker inspect --format '{{.Image}}' "$cid" 2>/dev/null) || return 0
+  [ -z "$img_id" ] && return 0
+  # Pick the first RepoTag that has a real tag (not <none>).
+  tag=$(docker inspect --format '{{range .RepoTags}}{{println .}}{{end}}' "$img_id" 2>/dev/null \
+    | awk -F: '$2!="" && $2!="<none>" {print $NF; exit}')
+  [ -n "$tag" ] && printf '%s' "$tag"
 }
 
 # Interactive version selection. Uses: VERSION_OVERRIDE, ASSUME_YES, REGISTRY, IMAGE_PATH, TSG_ID, REGISTRY_PASSWORD.
@@ -1608,6 +1611,9 @@ do_install() {
     select_image_version
   fi
 
+  # Re-sync IMAGE_REPO/IMAGE_TAG after selection mutated IMAGE_PATH.
+  split_image_path "$IMAGE_PATH"
+
   local FULL_IMAGE="${REGISTRY}/${IMAGE_PATH}"
   info "Registry: $REGISTRY"
   info "Image:    $FULL_IMAGE"
@@ -1636,22 +1642,28 @@ do_install() {
 
   local DIGEST_FILE="$SCRIPT_DIR/.image-digest"
 
-  # Skip the rest of install when the same tag is already running and the image
-  # is in the local Docker store. Avoids a noisy network roundtrip on re-runs.
-  # NOTE: This skips Step 4 (writing .env.runtime / docker-compose.yml). If the
-  # operator changed any tunable in .env (LOG_LEVEL, POOL_SIZE, etc.), they must
-  # run `docker compose down && up -d` separately for the change to land.
-  local _running_tag
+  # Two-tier skip when the image is already in the local Docker store:
+  # 1. Same tag already running -> no-op, exit cleanly.
+  # 2. Image cached but a different tag is running -> skip the pull, still write
+  #    config and restart so the new tag takes effect.
+  # NOTE: same-tag skip bypasses Step 4 (writing .env.runtime / docker-compose.yml).
+  # If the operator changed .env tunables, they must run `docker compose down && up -d`.
+  local _running_tag _image_cached=false
   _running_tag="$(running_image_tag)"
-  if [ -n "$_running_tag" ] && [ "$_running_tag" = "$IMAGE_TAG" ] \
-     && docker image inspect "$FULL_IMAGE" &>/dev/null; then
-    info "Tag $IMAGE_TAG already pulled and running. Skipping pull."
+  if docker image inspect "$FULL_IMAGE" &>/dev/null; then
+    _image_cached=true
+  fi
+
+  if [ "$_image_cached" = true ] && [ -n "$_running_tag" ] && [ "$_running_tag" = "$IMAGE_TAG" ]; then
+    info "Tag $IMAGE_TAG already pulled and running. Nothing to do."
     info "If you changed .env tunables, run: docker compose down && docker compose up -d"
     success "Image already present."
     exit 0
   fi
 
-  if [ "$QUIET" = true ]; then
+  if [ "$_image_cached" = true ]; then
+    info "Tag $IMAGE_TAG already in local Docker store. Skipping pull."
+  elif [ "$QUIET" = true ]; then
     local pull_err
     pull_err=$(docker pull "$FULL_IMAGE" 2>&1 >/dev/null) \
       || die "Failed to pull image: $FULL_IMAGE${pull_err:+ — $pull_err}"
@@ -1681,7 +1693,11 @@ do_install() {
     fi
   fi
 
-  success "Image pulled."
+  if [ "$_image_cached" = true ]; then
+    success "Image ready (cached)."
+  else
+    success "Image pulled."
+  fi
 
   # --- Step 4: Write config files ---
   step "4" "Writing configuration files"
