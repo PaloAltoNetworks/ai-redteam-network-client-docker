@@ -32,7 +32,7 @@ set -euo pipefail
 
 # --- Constants ---
 
-SCRIPT_VERSION="0.1.1"
+SCRIPT_VERSION="0.1.2"
 REGISTRY_DEFAULT="registry.ai-red-teaming.paloaltonetworks.com"
 REGISTRY="$REGISTRY_DEFAULT"
 KNOWN_REGISTRIES=(
@@ -91,6 +91,7 @@ Options:
   --version TAG         Use specific image tag (e.g. 1.2.1). Skips API recommendation.
   --list-versions       List available image tags from registry and exit
   --check-update        Print current/latest/action and exit (0=none, 1=upgrade|install, 2=error)
+  --force-pull          Force docker pull even if the image is already cached locally
   --yes, -y             Non-interactive: accept latest version without prompt
   --quiet, -q           Suppress info/success output (errors and warnings only)
   --script-version, -v  Print this script's version and exit
@@ -109,6 +110,7 @@ MODE="install"
 DRY_RUN=false
 QUIET=false
 ASSUME_YES=false
+FORCE_PULL=false
 VERSION_OVERRIDE=""
 
 while [ $# -gt 0 ]; do
@@ -124,6 +126,7 @@ while [ $# -gt 0 ]; do
                       VERSION_OVERRIDE="$2"; shift 2 ;;
     --version=*)      VERSION_OVERRIDE="${1#--version=}"; shift ;;
     --yes|-y)         ASSUME_YES=true; shift ;;
+    --force-pull)     FORCE_PULL=true; shift ;;
     --quiet|-q)       QUIET=true; shift ;;
     --script-version|-v) printf '%s\n' "$SCRIPT_VERSION"; exit 0 ;;
     --help|-h)        usage ;;
@@ -1648,15 +1651,28 @@ do_install() {
   #    config and restart so the new tag takes effect.
   # NOTE: same-tag skip bypasses Step 4 (writing .env.runtime / docker-compose.yml).
   # If the operator changed .env tunables, they must run `docker compose down && up -d`.
+  # --force-pull bypasses the cache skip entirely (e.g. registry repushed same tag).
   local _running_tag _image_cached=false
   _running_tag="$(running_image_tag)"
   if docker image inspect "$FULL_IMAGE" &>/dev/null; then
     _image_cached=true
   fi
 
-  if [ "$_image_cached" = true ] && [ -n "$_running_tag" ] && [ "$_running_tag" = "$IMAGE_TAG" ]; then
+  if [ "$FORCE_PULL" = true ]; then
+    if [ "$_image_cached" = true ]; then
+      info "Force-pull requested. Removing cached image and re-pulling $IMAGE_TAG."
+      local _compose
+      _compose=$(detect_compose)
+      if [ -n "$_compose" ]; then
+        $_compose down 2>&1 | sed 's/^/  /' || true
+      fi
+      docker rmi -f "$FULL_IMAGE" &>/dev/null || warn "Could not remove cached image (may be referenced elsewhere). Pull will revalidate from registry."
+    fi
+    _image_cached=false
+  elif [ "$_image_cached" = true ] && [ -n "$_running_tag" ] && [ "$_running_tag" = "$IMAGE_TAG" ]; then
     info "Tag $IMAGE_TAG already pulled and running. Nothing to do."
     info "If you changed .env tunables, run: docker compose down && docker compose up -d"
+    info "To force a fresh pull (e.g. registry repushed the tag), re-run with --force-pull."
     success "Image already present."
     exit 0
   fi
@@ -1679,8 +1695,8 @@ do_install() {
   info "Image digest: $IMAGE_DIGEST"
   log_deploy "image_pulled" "image=$FULL_IMAGE digest=$IMAGE_DIGEST"
 
-  # Check if digest changed
-  if [ "$IMAGE_DIGEST" != "unknown" ] && [ -f "$DIGEST_FILE" ]; then
+  # Check if digest changed (skipped on --force-pull, operator wants the restart)
+  if [ "$FORCE_PULL" != true ] && [ "$IMAGE_DIGEST" != "unknown" ] && [ -f "$DIGEST_FILE" ]; then
     local PREV_DIGEST
     PREV_DIGEST=$(cat "$DIGEST_FILE" 2>/dev/null || echo "")
     if [ "$PREV_DIGEST" = "$IMAGE_DIGEST" ]; then
