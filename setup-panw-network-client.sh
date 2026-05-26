@@ -90,6 +90,7 @@ Options:
   --diagnose            Analyze container logs for common issues
   --version TAG         Use specific image tag (e.g. 1.2.1). Skips API recommendation.
   --list-versions       List available image tags from registry and exit
+  --check-update        Print current/latest/action and exit (0=none, 1=upgrade|install, 2=error)
   --yes, -y             Non-interactive: accept latest version without prompt
   --quiet, -q           Suppress info/success output (errors and warnings only)
   --script-version, -v  Print this script's version and exit
@@ -118,6 +119,7 @@ while [ $# -gt 0 ]; do
     --validate)       MODE="validate"; shift ;;
     --diagnose)       MODE="diagnose"; shift ;;
     --list-versions)  MODE="list-versions"; shift ;;
+    --check-update)   MODE="check-update"; shift ;;
     --version)        [ -z "${2:-}" ] && { error "--version requires a tag"; exit 1; }
                       VERSION_OVERRIDE="$2"; shift 2 ;;
     --version=*)      VERSION_OVERRIDE="${1#--version=}"; shift ;;
@@ -1456,6 +1458,50 @@ do_list_versions() {
 }
 
 # =============================================================================
+# MODE: --check-update (non-interactive)
+# Prints `current=X latest=Y action=upgrade|none|install`. Exit codes:
+#   0 = up-to-date (action=none)
+#   1 = upgrade available (action=upgrade) or no container yet (action=install)
+#   2 = error (cannot determine — auth, registry, .env, or docker missing)
+# =============================================================================
+
+do_check_update() {
+  [ -f "$ENV_FILE" ] || { echo "error=missing-env"; exit 2; }
+  load_env "$ENV_FILE"
+  migrate_env_if_needed
+
+  if [ -z "${CLIENT_ID:-}" ] || [ -z "${CLIENT_SECRET:-}" ]; then
+    echo "error=missing-credentials"
+    exit 2
+  fi
+  if [ -z "${TSG_ID:-}" ]; then
+    TSG_ID=$(extract_tsg_id "$CLIENT_ID" 2>/dev/null) || { echo "error=tsg-id"; exit 2; }
+  fi
+
+  command -v docker &>/dev/null || { echo "error=docker-missing"; exit 2; }
+
+  resolve_registry
+  api_authenticate || { echo "error=auth"; exit 2; }
+  discover_image_from_api || { echo "error=image-discovery"; exit 2; }
+  split_image_path "$IMAGE_PATH"
+
+  local latest="$IMAGE_TAG"
+  local current
+  current="$(running_image_tag)"
+
+  if [ -z "$current" ]; then
+    printf 'current=none latest=%s action=install\n' "$latest"
+    exit 1
+  fi
+  if [ "$current" = "$latest" ]; then
+    printf 'current=%s latest=%s action=none\n' "$current" "$latest"
+    exit 0
+  fi
+  printf 'current=%s latest=%s action=upgrade\n' "$current" "$latest"
+  exit 1
+}
+
+# =============================================================================
 # MODE: install (Main setup flow)
 # =============================================================================
 
@@ -1856,5 +1902,6 @@ case "$MODE" in
   validate)       do_validate ;;
   diagnose)       do_diagnose ;;
   list-versions)  do_list_versions ;;
+  check-update)   do_check_update ;;
   install)        do_install ;;
 esac
