@@ -844,6 +844,7 @@ select_image_version() {
 
   local sorted
   sorted=$(printf '%s\n' "$tags" | semver_sort_desc) || true
+  debug "select_image_version: $(printf '%s\n' "$sorted" | grep -c . || true) semver tag(s) after filter; sample raw: $(printf '%s' "$tags" | tr '\n' ' ' | head -c 200)"
   [ -z "$sorted" ] && { warn "No semver tags found. Using latest: $latest"; return 0; }
 
   local local_tags running
