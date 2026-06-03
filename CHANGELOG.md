@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.6] - 2026-06-03
+
+### Fixed
+- Removed the broken container healthcheck from the generated `docker-compose.yml`. The client image is distroless (no `/bin/sh` or coreutils), so the `CMD-SHELL` procfs healthcheck could never execute and marked every container `unhealthy` despite a working connection. `restart: unless-stopped` plus the client's built-in websocket auto-reconnect already cover resilience; the docs now describe host-side log monitoring.
+
 ## [0.1.5] - 2026-06-03
 
 ### Added
