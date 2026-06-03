@@ -32,7 +32,7 @@ set -euo pipefail
 
 # --- Constants ---
 
-SCRIPT_VERSION="0.1.2"
+SCRIPT_VERSION="0.1.3"
 REGISTRY_DEFAULT="registry.ai-red-teaming.paloaltonetworks.com"
 REGISTRY="$REGISTRY_DEFAULT"
 KNOWN_REGISTRIES=(
@@ -65,6 +65,15 @@ warn()    { printf "${YELLOW}[WARN]${NC} %s\n" "$1" >&2; }
 error()   { printf "${RED}[ERR]${NC}  %s\n" "$1" >&2; }
 die()     { error "$1"; exit 1; }
 step()    { [ "$QUIET" = true ] || printf "\n${BOLD}--- Step %s: %s ---${NC}\n" "$1" "$2"; }
+
+# Probe a URL, echo the HTTP status code (or "000" when unreachable).
+# curl's -w already prints "000" on connection failure, so the fallback must
+# stay OUTSIDE the command substitution to avoid a doubled "000000".
+http_probe() {
+  local code
+  code=$(curl -so /dev/null --proto =https --max-time 5 -w "%{http_code}" "$1" 2>/dev/null) || code="000"
+  printf '%s' "$code"
+}
 
 # --- Deployment audit log ---
 
@@ -1297,7 +1306,7 @@ do_diagnose() {
 
     # API endpoint reachability
     local api_code
-    api_code=$(curl -so /dev/null --proto =https --max-time 5 -w "%{http_code}" "$API_BASE/v1/channels/stats" 2>/dev/null || echo "000")
+    api_code=$(http_probe "$API_BASE/v1/channels/stats")
     if [ "$api_code" != "000" ]; then
       success "API endpoint reachable (HTTP $api_code)"
     else
@@ -1307,7 +1316,7 @@ do_diagnose() {
 
     # Auth endpoint reachability
     local auth_code
-    auth_code=$(curl -so /dev/null --proto =https --max-time 5 -w "%{http_code}" "$AUTH_ENDPOINT" 2>/dev/null || echo "000")
+    auth_code=$(http_probe "$AUTH_ENDPOINT")
     if [ "$auth_code" != "000" ]; then
       success "Auth endpoint reachable (HTTP $auth_code)"
     else
@@ -1396,7 +1405,7 @@ preflight() {
   # Network reachability — needed by both --init (OAuth + REST) and --install
   if [ "$label" = "install" ] || [ "$label" = "init" ]; then
     local code
-    code=$(curl -so /dev/null --max-time 5 -w "%{http_code}" "https://api.sase.paloaltonetworks.com" 2>/dev/null || echo "000")
+    code=$(http_probe "https://api.sase.paloaltonetworks.com")
     if [ "$code" != "000" ]; then
       success "Network: api.sase.paloaltonetworks.com reachable (HTTP $code)"
     else

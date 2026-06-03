@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-06-03
+
+### Fixed
+- Network reachability preflight reported `HTTP 000000` and a false `[OK] reachable` when the endpoint was unreachable (e.g. firewall blocking outbound HTTPS). `curl -w "%{http_code}"` already emits `000` on connection failure, so the `|| echo "000"` fallback doubled it to `000000`, which slipped past the `!= "000"` guard. Extracted a single `http_probe` helper used by the `--init`/`--install` preflight and the `--diagnose` API/auth checks.
+
 ## [0.1.2] - 2026-05-26
 
 ### Added
