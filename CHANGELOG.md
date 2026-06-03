@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.5] - 2026-06-03
+
+### Added
+- `--debug` now reports how many registry tags matched the strict `X.Y.Z` semver filter during interactive version selection, plus a short sample of the raw tag list. Helps explain why version selection falls back to the latest tag when the registry uses non-semver tags.
+
 ## [0.1.4] - 2026-06-03
 
 ### Added
