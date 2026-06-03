@@ -127,7 +127,6 @@ cap_drop: [ALL]                        # Minimal capabilities
 mem_limit: 512m                        # Memory limit
 cpus: 1.0                              # CPU limit
 pids_limit: 256                        # Fork bomb protection
-healthcheck: ...                       # Automatic health monitoring
 ```
 
 Additional protections:
@@ -164,8 +163,18 @@ docker stats panw-network-client             # Resource usage
 
 ### Health Monitoring
 
+The client image is distroless (no shell or coreutils), so no in-container Docker
+healthcheck is defined. `restart: unless-stopped` handles crash recovery, and the
+client auto-reconnects on websocket drops. Monitor health from the host via logs:
+
 ```bash
-docker inspect --format='{{.State.Health.Status}}' $(docker ps -qf name=panw-network-client)
+CID=$(docker ps -qf name=panw-network-client)
+
+# Healthy: recurring successful re-auth (every ~5m)
+docker logs --since 10m "$CID" 2>&1 | grep -c 'Connection re-authenticated successfully'
+
+# Degraded: reconnect storm
+docker logs --since 5m "$CID" 2>&1 | grep -c 'websocket_error'
 ```
 
 ### Updating
@@ -271,6 +280,5 @@ Existing `.env` files from previous versions (with `TENANT_PATH`, `REGISTRY_HOST
 | `docker-compose.yml` image | Helm `values.yaml` image override |
 | `docker-compose.yml` security | Pod Security Context |
 | `docker-compose.yml` limits | Resource requests/limits |
-| `healthcheck` | Liveness/readiness probes |
 
 Runtime tunables in `.env.runtime` use the same names as the Helm `values.yaml` — config carries over directly.
