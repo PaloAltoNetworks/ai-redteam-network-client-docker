@@ -813,7 +813,7 @@ select_image_version() {
   }
 
   local sorted
-  sorted=$(printf '%s\n' "$tags" | semver_sort_desc)
+  sorted=$(printf '%s\n' "$tags" | semver_sort_desc) || true
   [ -z "$sorted" ] && { warn "No semver tags found. Using latest: $latest"; return 0; }
 
   local local_tags running
@@ -1466,7 +1466,7 @@ do_list_versions() {
     || die "Could not list tags from registry."
 
   local sorted
-  sorted=$(printf '%s\n' "$tags" | semver_sort_desc)
+  sorted=$(printf '%s\n' "$tags" | semver_sort_desc) || true
   [ -z "$sorted" ] && die "No semver-formatted tags found."
 
   local local_tags running
