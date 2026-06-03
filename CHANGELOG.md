@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.7] - 2026-06-03
+
+### Added
+- Releases are now built by a CI workflow on tag push, attaching a Sigstore build-provenance attestation to `setup-panw-network-client.sh`. Verify a downloaded copy with `gh attestation verify setup-panw-network-client.sh --repo PaloAltoNetworks/ai-redteam-network-client-docker`.
+
+### Changed
+- Install now downloads the script from the latest release (`curl -fLO .../releases/latest/download/setup-panw-network-client.sh`) instead of cloning the repo. Running from source is documented in the reference guide.
+
 ## [0.1.6] - 2026-06-03
 
 ### Fixed
