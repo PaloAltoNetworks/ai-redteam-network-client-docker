@@ -7,8 +7,8 @@ One-command Docker Compose install. No Kubernetes, no Helm. Runs on any server w
 ## Install
 
 ```bash
-git clone https://github.com/PaloAltoNetworks/ai-redteam-network-client-docker.git
-cd ai-redteam-network-client-docker
+curl -fLO https://github.com/PaloAltoNetworks/ai-redteam-network-client-docker/releases/latest/download/setup-panw-network-client.sh
+chmod +x setup-panw-network-client.sh
 ./setup-panw-network-client.sh
 ```
 
@@ -16,14 +16,7 @@ Prompts for **region**, **Client ID**, **Client Secret**. Everything else auto-d
 
 Verify: `./setup-panw-network-client.sh --validate` — expect `Connected to the server`.
 
-### Verifying the script
-
-Releases ship `setup-panw-network-client.sh` with a Sigstore build-provenance attestation. To confirm a downloaded copy was built by this repo's release workflow:
-
-```bash
-gh attestation verify setup-panw-network-client.sh \
-  --repo PaloAltoNetworks/ai-redteam-network-client-docker
-```
+Releases ship with a Sigstore build-provenance attestation, and cloning from source is covered in the [Reference](docs/reference.md).
 
 ## Docs
 
