@@ -64,6 +64,9 @@ success() { [ "$QUIET" = true ] || printf "${GREEN}[OK]${NC}   %s\n" "$1"; }
 warn()    { printf "${YELLOW}[WARN]${NC} %s\n" "$1" >&2; }
 error()   { printf "${RED}[ERR]${NC}  %s\n" "$1" >&2; }
 die()     { error "$1"; exit 1; }
+# Debug output to stderr, gated on DEBUG. Never pass secrets as args — callers
+# must redact tokens/passwords before calling.
+debug()   { [ "${DEBUG:-false}" = true ] && printf "${YELLOW}[DEBUG]${NC} %s\n" "$1" >&2 || true; }
 step()    { [ "$QUIET" = true ] || printf "\n${BOLD}--- Step %s: %s ---${NC}\n" "$1" "$2"; }
 
 # Probe a URL, echo the HTTP status code (or "000" when unreachable).
@@ -103,6 +106,7 @@ Options:
   --force-pull          Force docker pull even if the image is already cached locally
   --yes, -y             Non-interactive: accept latest version without prompt
   --quiet, -q           Suppress info/success output (errors and warnings only)
+  --debug               Verbose diagnostics to stderr (HTTP codes, response shapes; secrets redacted)
   --script-version, -v  Print this script's version and exit
   --help, -h            Show this help message
 
@@ -121,6 +125,7 @@ QUIET=false
 ASSUME_YES=false
 FORCE_PULL=false
 VERSION_OVERRIDE=""
+DEBUG=${DEBUG:-false}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -137,6 +142,7 @@ while [ $# -gt 0 ]; do
     --yes|-y)         ASSUME_YES=true; shift ;;
     --force-pull)     FORCE_PULL=true; shift ;;
     --quiet|-q)       QUIET=true; shift ;;
+    --debug)          DEBUG=true; shift ;;
     --script-version|-v) printf '%s\n' "$SCRIPT_VERSION"; exit 0 ;;
     --help|-h)        usage ;;
     *)                error "Unknown option: $1"; exit 1 ;;
@@ -443,21 +449,30 @@ registry_list_tags() {
   local tags_url="https://${registry}/v2/${image_name}/tags/list"
   local challenge http_code response
 
+  debug "registry_list_tags: GET $tags_url (user=${tsg_id})"
+
   # First attempt: Basic auth
-  local basic_resp
+  local basic_resp curl_rc
   basic_resp=$(curl --silent --show-error \
     --proto "=https" \
     --connect-timeout 10 \
     --max-time 30 \
     -u "${tsg_id}:${password}" \
     --write-out '\n%{http_code}' \
-    "$tags_url" 2>/dev/null) || return 1
+    "$tags_url" 2>/dev/null)
+  curl_rc=$?
+  if [ "$curl_rc" -ne 0 ]; then
+    debug "registry_list_tags: curl failed (basic auth), rc=$curl_rc"
+    return 1
+  fi
 
   http_code=$(printf '%s' "$basic_resp" | tail -1)
   response=$(printf '%s' "$basic_resp" | sed '$d')
+  debug "registry_list_tags: basic-auth http_code=$http_code, response_bytes=${#response}"
 
   # Handle bearer challenge if Basic rejected
   if [ "$http_code" = "401" ]; then
+    debug "registry_list_tags: basic auth got 401, attempting bearer challenge"
     local hdr_file
     hdr_file=$(new_auth_tmp) || return 1
     challenge=$(curl --silent --show-error \
@@ -468,22 +483,26 @@ registry_list_tags() {
     www_auth=$(grep -i '^www-authenticate:' "$hdr_file" 2>/dev/null | head -1 | tr -d '\r')
     rm -f "$hdr_file"
 
-    [[ "$www_auth" =~ realm=\"([^\"]+)\" ]] || return 1
+    if [[ ! "$www_auth" =~ realm=\"([^\"]+)\" ]]; then
+      debug "registry_list_tags: no realm in www-authenticate header (header='$www_auth')"
+      return 1
+    fi
     local realm="${BASH_REMATCH[1]}"
     local service="" scope=""
     [[ "$www_auth" =~ service=\"([^\"]+)\" ]] && service="${BASH_REMATCH[1]}"
     [[ "$www_auth" =~ scope=\"([^\"]+)\" ]] && scope="${BASH_REMATCH[1]}"
     [ -z "$scope" ] && scope="repository:${image_name}:pull"
+    debug "registry_list_tags: bearer realm=$realm service=$service scope=$scope"
 
-    local token_url="${realm}?service=${service}&scope=${scope}"
     local token_resp bearer
     token_resp=$(curl --silent --show-error \
       --proto "=https" --connect-timeout 10 --max-time 30 \
       -u "${tsg_id}:${password}" \
       --get --data-urlencode "service=${service}" --data-urlencode "scope=${scope}" \
-      "$realm" 2>/dev/null) || return 1
-    bearer=$(printf '%s' "$token_resp" | json_extract '.token // .access_token') || return 1
-    [ -z "$bearer" ] && return 1
+      "$realm" 2>/dev/null) || { debug "registry_list_tags: token endpoint curl failed"; return 1; }
+    bearer=$(printf '%s' "$token_resp" | json_extract '.token // .access_token') || {
+      debug "registry_list_tags: could not extract bearer token from token response (bytes=${#token_resp})"; return 1; }
+    [ -z "$bearer" ] && { debug "registry_list_tags: bearer token empty"; return 1; }
 
     local auth_hdr
     auth_hdr=$(new_auth_tmp) || return 1
@@ -492,18 +511,28 @@ registry_list_tags() {
       --proto "=https" --connect-timeout 10 --max-time 30 \
       --header @"$auth_hdr" \
       --write-out '\n%{http_code}' \
-      "$tags_url" 2>/dev/null) || { rm -f "$auth_hdr"; return 1; }
+      "$tags_url" 2>/dev/null) || { rm -f "$auth_hdr"; debug "registry_list_tags: tags fetch with bearer failed"; return 1; }
     rm -f "$auth_hdr"
     http_code=$(printf '%s' "$basic_resp" | tail -1)
     response=$(printf '%s' "$basic_resp" | sed '$d')
+    debug "registry_list_tags: bearer-auth http_code=$http_code, response_bytes=${#response}"
   fi
 
   case "$http_code" in
     2[0-9][0-9]) ;;
-    *) return 1 ;;
+    *) debug "registry_list_tags: non-2xx http_code=$http_code, body='$(printf '%s' "$response" | head -c 200)'"; return 1 ;;
   esac
 
-  printf '%s' "$response" | jq -r '.tags[]?' 2>/dev/null || return 1
+  local parsed
+  parsed=$(printf '%s' "$response" | jq -r '.tags[]?' 2>/dev/null) || {
+    debug "registry_list_tags: jq parse failed, body='$(printf '%s' "$response" | head -c 200)'"; return 1; }
+  local n
+  n=$(printf '%s' "$parsed" | grep -c . || true)
+  debug "registry_list_tags: parsed $n tag(s) from .tags[]"
+  if [ "$n" -eq 0 ]; then
+    debug "registry_list_tags: .tags empty/null, raw body='$(printf '%s' "$response" | head -c 200)'"
+  fi
+  printf '%s' "$parsed"
 }
 
 # Sort semver tags descending (newest first). Filters to strict X.Y.Z format.
@@ -807,10 +836,11 @@ select_image_version() {
 
   # Fetch tag list
   local tags
-  tags=$(registry_list_tags "$REGISTRY" "$repo" "$TSG_ID" "$REGISTRY_PASSWORD" 2>/dev/null) || {
+  tags=$(registry_list_tags "$REGISTRY" "$repo" "$TSG_ID" "$REGISTRY_PASSWORD") || {
     warn "Could not list tags from registry. Using latest: $latest"
     return 0
   }
+  debug "select_image_version: registry_list_tags returned ${#tags} bytes"
 
   local sorted
   sorted=$(printf '%s\n' "$tags" | semver_sort_desc) || true
