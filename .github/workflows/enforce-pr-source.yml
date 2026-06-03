@@ -1,0 +1,24 @@
+name: Enforce PR source for main
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+    branches: [main]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  enforce-source:
+    if: github.event.pull_request.head.ref != 'develop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment and close
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body \
+            "Only pull requests from \`develop\` may target \`main\`. This PR is from \`$HEAD_REF\`, so it is being closed automatically. Open your PR against \`develop\` instead, then release through \`develop\` -> \`main\`."
+          gh pr close "$PR" --repo "$GITHUB_REPOSITORY"
