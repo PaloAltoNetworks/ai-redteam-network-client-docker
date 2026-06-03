@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a problem with the setup script
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project is **community-supported**. It is maintained on a best-effort basis and is not covered by any Palo Alto Networks support contract or SLA. Responses depend on maintainer and community availability.
+
+        For product, account, or platform issues, use [official Palo Alto Networks support](https://www.paloaltonetworks.com/company/contact-support).
+  - type: input
+    id: version
+    attributes:
+      label: Script version
+      description: Output of `./setup-panw-network-client.sh --help` (top line) or the `SCRIPT_VERSION` value.
+      placeholder: "0.1.5"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands and flags used, in order.
+      placeholder: |
+        1. ./setup-panw-network-client.sh --init
+        2. ./setup-panw-network-client.sh
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: |
+        Re-run with `--debug` and paste the output. **Redact credentials, tokens, client secrets, and channel IDs.**
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS + version, Docker version, Docker Compose version, region (US/NL/SG).
+      placeholder: |
+        OS: Ubuntu 24.04
+        Docker: 29.5.2
+        Compose: 5.1.4
+        Region: us
+    validations:
+      required: true
