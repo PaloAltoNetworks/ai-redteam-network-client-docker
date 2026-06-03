@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.4] - 2026-06-03
+
+### Added
+- `--debug` flag surfaces registry tag-listing diagnostics: the GET URL, basic-auth and bearer-auth HTTP codes, the bearer challenge realm/service/scope, and the parsed tag count. Helps diagnose why `registry_list_tags` falls back to "Using latest" without exposing credentials.
+
+### Fixed
+- Silent exit when the registry returned no semver-formatted tags. `semver_sort_desc` produced no output and the script exited without explanation; it now warns and falls back to the latest tag from the API.
+
 ## [0.1.3] - 2026-06-03
 
 ### Fixed
