@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.8] - 2026-06-03
+
+### Changed
+- Release workflow now pins its GitHub Actions to immutable commit SHAs (`actions/checkout` v6.0.3, `actions/attest` v4.1.0) and uses `actions/attest` directly instead of the deprecated `actions/attest-build-provenance` wrapper. No change to the generated attestation.
+
 ## [0.1.7] - 2026-06-03
 
 ### Added
