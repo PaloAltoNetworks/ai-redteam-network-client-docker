@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Palo Alto Networks Official Support
+    url: https://www.paloaltonetworks.com/company/contact-support
+    about: This project is community-supported and NOT covered by Palo Alto Networks support contracts or SLAs. For product or account issues, contact official support.
