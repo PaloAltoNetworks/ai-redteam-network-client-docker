@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.11] - 2026-06-09
+
+### Fixed
+- Same silent-exit class as 0.1.9/0.1.10, three more sites. Three command-substitution assignments ran `grep` under `set -euo pipefail` without guarding the exit code; when grep legitimately matched nothing, `pipefail` propagated non-zero and `set -e` aborted the script. The reported case: a fresh host that had only run `--init` (no `action=install` line in `deploy.log` yet) died right before the interactive version menu. Also hardened the bearer-challenge header parse and the `--status` image lookup; the latter now warns on a malformed `docker-compose.yml` instead of printing an empty value.
+
 ## [0.1.10] - 2026-06-09
 
 ### Fixed
