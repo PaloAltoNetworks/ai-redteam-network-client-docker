@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.9] - 2026-06-09
+
+### Fixed
+- The installer could exit silently (exit code 1) right after listing available versions, when a client container was already running from an image that had no local tag. Re-running the script now reaches the version menu as expected, and the `--version TAG` workaround is no longer needed. Thanks to Matt Zhang for reporting.
+
 ## [0.1.8] - 2026-06-03
 
 ### Changed
