@@ -32,7 +32,7 @@ set -euo pipefail
 
 # --- Constants ---
 
-SCRIPT_VERSION="0.1.9"
+SCRIPT_VERSION="0.1.10"
 REGISTRY_DEFAULT="registry.ai-red-teaming.paloaltonetworks.com"
 REGISTRY="$REGISTRY_DEFAULT"
 KNOWN_REGISTRIES=(
@@ -797,6 +797,7 @@ list_local_tags() {
   command -v docker &>/dev/null || return 0
   docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
     | awk -v ref="$ref" -F: '$1==ref && $2!="<none>" {print $2}'
+  return 0
 }
 
 # Print the tag of the running container for this compose project, or empty.
