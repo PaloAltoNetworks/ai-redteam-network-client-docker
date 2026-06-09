@@ -813,6 +813,7 @@ running_image_tag() {
   tag=$(docker inspect --format '{{range .RepoTags}}{{println .}}{{end}}' "$img_id" 2>/dev/null \
     | awk -F: '$2!="" && $2!="<none>" {print $NF; exit}')
   [ -n "$tag" ] && printf '%s' "$tag"
+  return 0
 }
 
 # Interactive version selection. Uses: VERSION_OVERRIDE, ASSUME_YES, REGISTRY, IMAGE_PATH, TSG_ID, REGISTRY_PASSWORD.
