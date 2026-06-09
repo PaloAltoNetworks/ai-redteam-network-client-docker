@@ -797,6 +797,7 @@ list_local_tags() {
   command -v docker &>/dev/null || return 0
   docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
     | awk -v ref="$ref" -F: '$1==ref && $2!="<none>" {print $2}'
+  return 0
 }
 
 # Print the tag of the running container for this compose project, or empty.
