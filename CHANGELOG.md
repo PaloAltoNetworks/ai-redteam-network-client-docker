@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.10] - 2026-06-09
+
+### Fixed
+- The installer could still exit silently right after listing available versions. The 0.1.9 fix covered `running_image_tag`, but its twin `list_local_tags` ended in the same bare `docker images` pipe with no `return 0`; under `set -euo pipefail`, a failing `docker images` (e.g. under `sudo`) made the pipe non-zero and aborted the script. Both functions now return cleanly.
+
 ## [0.1.9] - 2026-06-09
 
 ### Fixed
