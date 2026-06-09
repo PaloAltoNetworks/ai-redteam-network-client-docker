@@ -480,7 +480,7 @@ registry_list_tags() {
       -D "$hdr_file" -o /dev/null \
       "$tags_url" 2>/dev/null || true)
     local www_auth
-    www_auth=$(grep -i '^www-authenticate:' "$hdr_file" 2>/dev/null | head -1 | tr -d '\r')
+    www_auth=$(grep -i '^www-authenticate:' "$hdr_file" 2>/dev/null | head -1 | tr -d '\r') || true
     rm -f "$hdr_file"
 
     if [[ ! "$www_auth" =~ realm=\"([^\"]+)\" ]]; then
@@ -864,7 +864,7 @@ select_image_version() {
     fi
   elif [ -f "$DEPLOY_LOG" ]; then
     local last_install ts user img
-    last_install=$(grep ' action=install ' "$DEPLOY_LOG" 2>/dev/null | tail -1)
+    last_install=$(grep ' action=install ' "$DEPLOY_LOG" 2>/dev/null | tail -1) || true
     if [ -n "$last_install" ]; then
       ts=$(printf '%s' "$last_install" | sed -nE 's/^\[([^]]+)\].*/\1/p')
       user=$(printf '%s' "$last_install" | sed -nE 's/.* user=([^ ]+).*/\1/p')
@@ -1135,8 +1135,12 @@ do_status() {
   echo ""
   if [ -f "$SCRIPT_DIR/docker-compose.yml" ]; then
     local img
-    img=$(grep "image:" "$SCRIPT_DIR/docker-compose.yml" | head -1 | awk '{print $2}' | tr -d '"')
-    info "Deployed image: $img"
+    img=$(grep "image:" "$SCRIPT_DIR/docker-compose.yml" | head -1 | awk '{print $2}' | tr -d '"') || true
+    if [ -n "$img" ]; then
+      info "Deployed image: $img"
+    else
+      warn "No image: line in docker-compose.yml — file may be malformed. Re-run to regenerate."
+    fi
   fi
 
   # Check deploy log
