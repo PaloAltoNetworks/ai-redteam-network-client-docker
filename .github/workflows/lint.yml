@@ -3,7 +3,11 @@ name: Lint
 on:
   push:
     branches: [main, develop]
+    paths:
+      - "**.sh"
   pull_request:
+    paths:
+      - "**.sh"
 
 permissions:
   contents: read
