@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # =============================================================================
@@ -32,7 +32,7 @@ set -euo pipefail
 
 # --- Constants ---
 
-SCRIPT_VERSION="0.1.11"
+SCRIPT_VERSION="0.1.12"
 REGISTRY_DEFAULT="registry.ai-red-teaming.paloaltonetworks.com"
 REGISTRY="$REGISTRY_DEFAULT"
 KNOWN_REGISTRIES=(
@@ -59,15 +59,18 @@ fi
 
 # --- Output helpers ---
 
-info()    { [ "$QUIET" = true ] || printf "${BLUE}[INFO]${NC} %s\n" "$1"; }
+info() { [ "$QUIET" = true ] || printf "${BLUE}[INFO]${NC} %s\n" "$1"; }
 success() { [ "$QUIET" = true ] || printf "${GREEN}[OK]${NC}   %s\n" "$1"; }
-warn()    { printf "${YELLOW}[WARN]${NC} %s\n" "$1" >&2; }
-error()   { printf "${RED}[ERR]${NC}  %s\n" "$1" >&2; }
-die()     { error "$1"; exit 1; }
+warn() { printf "${YELLOW}[WARN]${NC} %s\n" "$1" >&2; }
+error() { printf "${RED}[ERR]${NC}  %s\n" "$1" >&2; }
+die() {
+  error "$1"
+  exit 1
+}
 # Debug output to stderr, gated on DEBUG. Never pass secrets as args — callers
 # must redact tokens/passwords before calling.
-debug()   { [ "${DEBUG:-false}" = true ] && printf "${YELLOW}[DEBUG]${NC} %s\n" "$1" >&2 || true; }
-step()    { [ "$QUIET" = true ] || printf "\n${BOLD}--- Step %s: %s ---${NC}\n" "$1" "$2"; }
+debug() { [ "${DEBUG:-false}" = true ] && printf "${YELLOW}[DEBUG]${NC} %s\n" "$1" >&2 || true; }
+step() { [ "$QUIET" = true ] || printf "\n${BOLD}--- Step %s: %s ---${NC}\n" "$1" "$2"; }
 
 # Probe a URL, echo the HTTP status code (or "000" when unreachable).
 # curl's -w already prints "000" on connection failure, so the fallback must
@@ -83,7 +86,7 @@ http_probe() {
 log_deploy() {
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  printf "[%s] user=%s action=%s %s\n" "$ts" "$(whoami)" "$1" "${2:-}" >> "$DEPLOY_LOG"
+  printf "[%s] user=%s action=%s %s\n" "$ts" "$(whoami)" "$1" "${2:-}" >>"$DEPLOY_LOG"
   chmod 600 "$DEPLOY_LOG" 2>/dev/null || true
 }
 
@@ -129,23 +132,71 @@ DEBUG=${DEBUG:-false}
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --init)           MODE="init"; shift ;;
-    --dry-run)        DRY_RUN=true; shift ;;
-    --status)         MODE="status"; shift ;;
-    --validate)       MODE="validate"; shift ;;
-    --diagnose)       MODE="diagnose"; shift ;;
-    --list-versions)  MODE="list-versions"; shift ;;
-    --check-update)   MODE="check-update"; shift ;;
-    --version)        [ -z "${2:-}" ] && { error "--version requires a tag"; exit 1; }
-                      VERSION_OVERRIDE="$2"; shift 2 ;;
-    --version=*)      VERSION_OVERRIDE="${1#--version=}"; shift ;;
-    --yes|-y)         ASSUME_YES=true; shift ;;
-    --force-pull)     FORCE_PULL=true; shift ;;
-    --quiet|-q)       QUIET=true; shift ;;
-    --debug)          DEBUG=true; shift ;;
-    --script-version|-v) printf '%s\n' "$SCRIPT_VERSION"; exit 0 ;;
-    --help|-h)        usage ;;
-    *)                error "Unknown option: $1"; exit 1 ;;
+    --init)
+      MODE="init"
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --status)
+      MODE="status"
+      shift
+      ;;
+    --validate)
+      MODE="validate"
+      shift
+      ;;
+    --diagnose)
+      MODE="diagnose"
+      shift
+      ;;
+    --list-versions)
+      MODE="list-versions"
+      shift
+      ;;
+    --check-update)
+      MODE="check-update"
+      shift
+      ;;
+    --version)
+      [ -z "${2:-}" ] && {
+        error "--version requires a tag"
+        exit 1
+      }
+      VERSION_OVERRIDE="$2"
+      shift 2
+      ;;
+    --version=*)
+      VERSION_OVERRIDE="${1#--version=}"
+      shift
+      ;;
+    --yes | -y)
+      ASSUME_YES=true
+      shift
+      ;;
+    --force-pull)
+      FORCE_PULL=true
+      shift
+      ;;
+    --quiet | -q)
+      QUIET=true
+      shift
+      ;;
+    --debug)
+      DEBUG=true
+      shift
+      ;;
+    --script-version | -v)
+      printf '%s\n' "$SCRIPT_VERSION"
+      exit 0
+      ;;
+    --help | -h) usage ;;
+    *)
+      error "Unknown option: $1"
+      exit 1
+      ;;
   esac
 done
 
@@ -165,7 +216,7 @@ load_env() {
       fi
       export "$key=$value"
     fi
-  done < "$file"
+  done <"$file"
 }
 
 # --- Detect docker compose command ---
@@ -187,7 +238,7 @@ detect_compose() {
 
 require_basics() {
   local missing=()
-  command -v jq   &>/dev/null || missing+=("jq")
+  command -v jq &>/dev/null || missing+=("jq")
   command -v curl &>/dev/null || missing+=("curl")
   if [ ${#missing[@]} -gt 0 ]; then
     error "Missing required dependencies: ${missing[*]}"
@@ -256,7 +307,7 @@ api_authenticate() {
 
   local basic_cred
   basic_cred=$(printf '%s:%s' "$client_id" "$client_secret" | base64 | tr -d '\n')
-  printf 'Authorization: Basic %s\n' "$basic_cred" > "$_auth_hdr"
+  printf 'Authorization: Basic %s\n' "$basic_cred" >"$_auth_hdr"
 
   local scope_data="grant_type=client_credentials"
   if [ -n "$tsg_id" ]; then
@@ -270,7 +321,10 @@ api_authenticate() {
     --max-time 30 \
     --header @"$_auth_hdr" \
     --data "$scope_data" \
-    "$AUTH_ENDPOINT" 2>/dev/null) || { rm -f "$_auth_hdr"; return 1; }
+    "$AUTH_ENDPOINT" 2>/dev/null) || {
+    rm -f "$_auth_hdr"
+    return 1
+  }
 
   rm -f "$_auth_hdr"
 
@@ -282,7 +336,7 @@ api_authenticate() {
   expires_in=$(printf '%s' "$response" | json_extract '.expires_in') || expires_in=899
 
   API_TOKEN="$token"
-  API_TOKEN_EXPIRY=$(( $(date +%s) + expires_in - 60 ))
+  API_TOKEN_EXPIRY=$(($(date +%s) + expires_in - 60))
   API_AVAILABLE=true
   return 0
 }
@@ -309,7 +363,10 @@ api_call() {
 
   case "$endpoint" in
     https://*) ;;
-    *) error "Refusing non-HTTPS API call"; return 1 ;;
+    *)
+      error "Refusing non-HTTPS API call"
+      return 1
+      ;;
   esac
 
   api_ensure_token || return 1
@@ -317,7 +374,7 @@ api_call() {
   local _call_hdr
   _call_hdr=$(new_auth_tmp) || return 1
 
-  printf 'Authorization: Bearer %s\n' "$API_TOKEN" > "$_call_hdr"
+  printf 'Authorization: Bearer %s\n' "$API_TOKEN" >"$_call_hdr"
 
   local curl_args=(
     --silent --show-error
@@ -356,8 +413,11 @@ api_call() {
         ;;
       401)
         API_TOKEN=""
-        api_authenticate || { rm -f "$_call_hdr"; return 1; }
-        printf 'Authorization: Bearer %s\n' "$API_TOKEN" > "$_call_hdr"
+        api_authenticate || {
+          rm -f "$_call_hdr"
+          return 1
+        }
+        printf 'Authorization: Bearer %s\n' "$API_TOKEN" >"$_call_hdr"
         attempt=$((attempt + 1))
         ;;
       429)
@@ -392,8 +452,8 @@ api_create_channel() {
   local desc="${2:-}"
   local body
   body=$(jq -cn --arg name "$name" --arg desc "$desc" \
-    'if $desc == "" then {name:$name} else {name:$name, description:$desc} end') \
-    || return 1
+    'if $desc == "" then {name:$name} else {name:$name, description:$desc} end') ||
+    return 1
   api_call "POST" "/v1/channels" "$body"
 }
 
@@ -414,7 +474,7 @@ api_get_registry_credentials() {
   local _reg_header_file
   _reg_header_file=$(new_auth_tmp) || return 1
 
-  printf 'Authorization: Bearer %s\n' "$API_TOKEN" > "$_reg_header_file"
+  printf 'Authorization: Bearer %s\n' "$API_TOKEN" >"$_reg_header_file"
 
   local raw_response http_code response
   raw_response=$(curl --silent --show-error \
@@ -425,7 +485,10 @@ api_get_registry_credentials() {
     --header "Content-Type: application/json" \
     --request POST \
     --write-out '\n%{http_code}' \
-    "${MGMT_API_BASE}/v1/registry-credentials" 2>/dev/null) || { rm -f "$_reg_header_file"; return 1; }
+    "${MGMT_API_BASE}/v1/registry-credentials" 2>/dev/null) || {
+    rm -f "$_reg_header_file"
+    return 1
+  }
 
   rm -f "$_reg_header_file"
 
@@ -433,7 +496,10 @@ api_get_registry_credentials() {
   response=$(printf '%s' "$raw_response" | sed '$d')
 
   case "$http_code" in
-    2[0-9][0-9]) printf '%s' "$response"; return 0 ;;
+    2[0-9][0-9])
+      printf '%s' "$response"
+      return 0
+      ;;
     *) return 1 ;;
   esac
 }
@@ -447,7 +513,7 @@ registry_list_tags() {
   [ -z "$registry" ] || [ -z "$image_name" ] || [ -z "$tsg_id" ] || [ -z "$password" ] && return 1
 
   local tags_url="https://${registry}/v2/${image_name}/tags/list"
-  local challenge http_code response
+  local http_code response
 
   debug "registry_list_tags: GET $tags_url (user=${tsg_id})"
 
@@ -475,10 +541,10 @@ registry_list_tags() {
     debug "registry_list_tags: basic auth got 401, attempting bearer challenge"
     local hdr_file
     hdr_file=$(new_auth_tmp) || return 1
-    challenge=$(curl --silent --show-error \
+    curl --silent --show-error \
       --proto "=https" --connect-timeout 10 --max-time 15 \
       -D "$hdr_file" -o /dev/null \
-      "$tags_url" 2>/dev/null || true)
+      "$tags_url" 2>/dev/null || true
     local www_auth
     www_auth=$(grep -i '^www-authenticate:' "$hdr_file" 2>/dev/null | head -1 | tr -d '\r') || true
     rm -f "$hdr_file"
@@ -499,19 +565,31 @@ registry_list_tags() {
       --proto "=https" --connect-timeout 10 --max-time 30 \
       -u "${tsg_id}:${password}" \
       --get --data-urlencode "service=${service}" --data-urlencode "scope=${scope}" \
-      "$realm" 2>/dev/null) || { debug "registry_list_tags: token endpoint curl failed"; return 1; }
+      "$realm" 2>/dev/null) || {
+      debug "registry_list_tags: token endpoint curl failed"
+      return 1
+    }
     bearer=$(printf '%s' "$token_resp" | json_extract '.token // .access_token') || {
-      debug "registry_list_tags: could not extract bearer token from token response (bytes=${#token_resp})"; return 1; }
-    [ -z "$bearer" ] && { debug "registry_list_tags: bearer token empty"; return 1; }
+      debug "registry_list_tags: could not extract bearer token from token response (bytes=${#token_resp})"
+      return 1
+    }
+    [ -z "$bearer" ] && {
+      debug "registry_list_tags: bearer token empty"
+      return 1
+    }
 
     local auth_hdr
     auth_hdr=$(new_auth_tmp) || return 1
-    printf 'Authorization: Bearer %s\n' "$bearer" > "$auth_hdr"
+    printf 'Authorization: Bearer %s\n' "$bearer" >"$auth_hdr"
     basic_resp=$(curl --silent --show-error \
       --proto "=https" --connect-timeout 10 --max-time 30 \
       --header @"$auth_hdr" \
       --write-out '\n%{http_code}' \
-      "$tags_url" 2>/dev/null) || { rm -f "$auth_hdr"; debug "registry_list_tags: tags fetch with bearer failed"; return 1; }
+      "$tags_url" 2>/dev/null) || {
+      rm -f "$auth_hdr"
+      debug "registry_list_tags: tags fetch with bearer failed"
+      return 1
+    }
     rm -f "$auth_hdr"
     http_code=$(printf '%s' "$basic_resp" | tail -1)
     response=$(printf '%s' "$basic_resp" | sed '$d')
@@ -520,12 +598,17 @@ registry_list_tags() {
 
   case "$http_code" in
     2[0-9][0-9]) ;;
-    *) debug "registry_list_tags: non-2xx http_code=$http_code, body='$(printf '%s' "$response" | head -c 200)'"; return 1 ;;
+    *)
+      debug "registry_list_tags: non-2xx http_code=$http_code, body='$(printf '%s' "$response" | head -c 200)'"
+      return 1
+      ;;
   esac
 
   local parsed
   parsed=$(printf '%s' "$response" | jq -r '.tags[]?' 2>/dev/null) || {
-    debug "registry_list_tags: jq parse failed, body='$(printf '%s' "$response" | head -c 200)'"; return 1; }
+    debug "registry_list_tags: jq parse failed, body='$(printf '%s' "$response" | head -c 200)'"
+    return 1
+  }
   local n
   n=$(printf '%s' "$parsed" | grep -c . || true)
   debug "registry_list_tags: parsed $n tag(s) from .tags[]"
@@ -546,9 +629,9 @@ registry_token_needs_refresh() {
   [ -z "${REGISTRY_TOKEN:-}" ] && return 0
   [ -z "${REGISTRY_TOKEN_EXPIRY:-}" ] && return 0
   local threshold
-  threshold=$(date -u -d '+1 day' +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null) \
-    || threshold=$(date -u -v+1d +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null) \
-    || return 1
+  threshold=$(date -u -d '+1 day' +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null) ||
+    threshold=$(date -u -v+1d +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null) ||
+    return 1
   [[ "$REGISTRY_TOKEN_EXPIRY" < "$threshold" ]]
 }
 
@@ -558,10 +641,11 @@ persist_registry_token() {
   [ -f "$ENV_FILE" ] || return 1
   tmp=$(mktemp "${ENV_FILE}.XXXXXX") || return 1
   chmod 600 "$tmp"
-  ( umask 077
-    grep -v -E '^[[:space:]]*(REGISTRY_TOKEN|REGISTRY_TOKEN_EXPIRY)=' "$ENV_FILE" > "$tmp" || true
-    printf 'REGISTRY_TOKEN="%s"\n' "${token//\"/\\\"}" >> "$tmp"
-    [ -n "$expiry" ] && printf 'REGISTRY_TOKEN_EXPIRY="%s"\n' "${expiry//\"/\\\"}" >> "$tmp"
+  (
+    umask 077
+    grep -v -E '^[[:space:]]*(REGISTRY_TOKEN|REGISTRY_TOKEN_EXPIRY)=' "$ENV_FILE" >"$tmp" || true
+    printf 'REGISTRY_TOKEN="%s"\n' "${token//\"/\\\"}" >>"$tmp"
+    [ -n "$expiry" ] && printf 'REGISTRY_TOKEN_EXPIRY="%s"\n' "${expiry//\"/\\\"}" >>"$tmp"
   )
   mv "$tmp" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
@@ -634,7 +718,7 @@ select_channel() {
   local selectable_ids=()
   local selectable_names=()
 
-  while IFS=$'\t' read -r uuid name status last_online; do
+  while IFS=$'\t' read -r uuid name status _last_online; do
     if [ "$status" = "ONLINE" ]; then
       printf "     %s  %-30s ${GREEN}ONLINE${NC}  (in use)\n" "-" "$name"
     else
@@ -659,9 +743,15 @@ select_channel() {
     if [ "$choice" = "$create_idx" ]; then
       printf "\n  Channel name: "
       read -r new_name
-      [ -z "$new_name" ] && { warn "Name cannot be empty."; continue; }
+      [ -z "$new_name" ] && {
+        warn "Name cannot be empty."
+        continue
+      }
       local created
-      created=$(api_create_channel "$new_name") || { warn "Failed to create channel. Try again."; continue; }
+      created=$(api_create_channel "$new_name") || {
+        warn "Failed to create channel. Try again."
+        continue
+      }
       CHANNEL_ID=$(printf '%s' "$created" | json_extract '.uuid')
       CHANNEL_NAME=$(printf '%s' "$created" | json_extract '.name')
       validate_uuid "$CHANNEL_ID" || die "API returned invalid channel ID."
@@ -694,8 +784,8 @@ prompt_channel_id() {
   # Best-effort: confirm the channel exists on this tenant before committing
   if [ "$API_AVAILABLE" = true ]; then
     local ch_info
-    ch_info=$(api_get_channel "$CHANNEL_ID" 2>/dev/null) \
-      || die "Channel ID not found on this tenant. Check the portal or run --init to pick from the list."
+    ch_info=$(api_get_channel "$CHANNEL_ID" 2>/dev/null) ||
+      die "Channel ID not found on this tenant. Check the portal or run --init to pick from the list."
     CHANNEL_NAME=$(printf '%s' "$ch_info" | json_extract '.name') || CHANNEL_NAME=""
   fi
 }
@@ -711,7 +801,7 @@ resolve_registry() {
     us) REGISTRY="registry.ai-red-teaming.paloaltonetworks.com" ;;
     nl) REGISTRY="registry-nl.ai-red-teaming.paloaltonetworks.com" ;;
     sg) REGISTRY="registry-sg.ai-red-teaming.paloaltonetworks.com" ;;
-    *)  REGISTRY="$REGISTRY_DEFAULT" ;;
+    *) REGISTRY="$REGISTRY_DEFAULT" ;;
   esac
 }
 
@@ -735,9 +825,18 @@ select_region() {
     printf "  Select region [1-3]: "
     read -r choice
     case "$choice" in
-      1) REGION="us"; break ;;
-      2) REGION="nl"; break ;;
-      3) REGION="sg"; break ;;
+      1)
+        REGION="us"
+        break
+        ;;
+      2)
+        REGION="nl"
+        break
+        ;;
+      3)
+        REGION="sg"
+        break
+        ;;
       *) warn "Invalid selection. Enter 1, 2, or 3." ;;
     esac
   done
@@ -795,8 +894,8 @@ list_local_tags() {
   local registry="$1" repo="$2"
   local ref="${registry}/${repo}"
   command -v docker &>/dev/null || return 0
-  docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
-    | awk -v ref="$ref" -F: '$1==ref && $2!="<none>" {print $2}'
+  docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null |
+    awk -v ref="$ref" -F: '$1==ref && $2!="<none>" {print $2}'
   return 0
 }
 
@@ -811,8 +910,8 @@ running_image_tag() {
   img_id=$(docker inspect --format '{{.Image}}' "$cid" 2>/dev/null) || return 0
   [ -z "$img_id" ] && return 0
   # Pick the first RepoTag that has a real tag (not <none>).
-  tag=$(docker inspect --format '{{range .RepoTags}}{{println .}}{{end}}' "$img_id" 2>/dev/null \
-    | awk -F: '$2!="" && $2!="<none>" {print $NF; exit}')
+  tag=$(docker inspect --format '{{range .RepoTags}}{{println .}}{{end}}' "$img_id" 2>/dev/null |
+    awk -F: '$2!="" && $2!="<none>" {print $NF; exit}')
   [ -n "$tag" ] && printf '%s' "$tag"
   return 0
 }
@@ -847,7 +946,10 @@ select_image_version() {
   local sorted
   sorted=$(printf '%s\n' "$tags" | semver_sort_desc) || true
   debug "select_image_version: $(printf '%s\n' "$sorted" | grep -c . || true) semver tag(s) after filter; sample raw: $(printf '%s' "$tags" | tr '\n' ' ' | head -c 200)"
-  [ -z "$sorted" ] && { warn "No semver tags found. Using latest: $latest"; return 0; }
+  [ -z "$sorted" ] && {
+    warn "No semver tags found. Using latest: $latest"
+    return 0
+  }
 
   local local_tags running
   local_tags=$(list_local_tags "$REGISTRY" "$repo")
@@ -893,7 +995,7 @@ select_image_version() {
     printf "  %d) %s%s\n" "$i" "$tag" "$marker"
     i=$((i + 1))
     [ "$i" -gt 20 ] && break
-  done <<< "$sorted"
+  done <<<"$sorted"
 
   printf "\nSelect version [Enter=latest %s, or number/tag]: " "$latest"
   read -r choice
@@ -935,14 +1037,17 @@ migrate_env_if_needed() {
 
     # Preserve original only on first migration
     if [ ! -f "${ENV_FILE}.old" ]; then
-      ( umask 077; cp "$ENV_FILE" "${ENV_FILE}.old" )
+      (
+        umask 077
+        cp "$ENV_FILE" "${ENV_FILE}.old"
+      )
       chmod 600 "${ENV_FILE}.old"
     fi
 
     case "${REGISTRY_HOST:-}" in
       *-nl.*) REGION="nl" ;;
       *-sg.*) REGION="sg" ;;
-      *)      REGION="us" ;;
+      *) REGION="us" ;;
     esac
 
     if [ -z "${TSG_ID:-}" ] && [ -n "${REGISTRY_USERNAME:-}" ]; then
@@ -955,12 +1060,16 @@ migrate_env_if_needed() {
 
     # Persist migration so the next run is clean. Rewrite atomically.
     local tmp
-    tmp=$(mktemp "${ENV_FILE}.XXXXXX") || { warn "Migration in-memory only (mktemp failed)"; return 0; }
+    tmp=$(mktemp "${ENV_FILE}.XXXXXX") || {
+      warn "Migration in-memory only (mktemp failed)"
+      return 0
+    }
     chmod 600 "$tmp"
-    ( umask 077
-      grep -v -E '^[[:space:]]*(TENANT_PATH|REGISTRY_HOST|REGISTRY_USERNAME|REGION|TSG_ID)=' "$ENV_FILE" > "$tmp" || true
-      printf 'REGION="%s"\n' "${REGION//\"/\\\"}" >> "$tmp"
-      [ -n "${TSG_ID:-}" ] && printf 'TSG_ID="%s"\n' "${TSG_ID//\"/\\\"}" >> "$tmp"
+    (
+      umask 077
+      grep -v -E '^[[:space:]]*(TENANT_PATH|REGISTRY_HOST|REGISTRY_USERNAME|REGION|TSG_ID)=' "$ENV_FILE" >"$tmp" || true
+      printf 'REGION="%s"\n' "${REGION//\"/\\\"}" >>"$tmp"
+      [ -n "${TSG_ID:-}" ] && printf 'TSG_ID="%s"\n' "${TSG_ID//\"/\\\"}" >>"$tmp"
     )
     mv "$tmp" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
@@ -1060,7 +1169,8 @@ do_init() {
   select_channel
 
   # Write .env under restrictive umask so the file is never group/world-readable
-  ( umask 077
+  (
+    umask 077
     {
       printf '# Generated by setup-panw-network-client.sh --init\n'
       printf '# Date: %s\n\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -1072,7 +1182,7 @@ do_init() {
       printf 'REGION="%s"\n' "${REGION//\"/\\\"}"
       printf 'REGISTRY_TOKEN="%s"\n' "${REG_TOKEN//\"/\\\"}"
       if [ -n "$REG_EXPIRY" ]; then printf 'REGISTRY_TOKEN_EXPIRY="%s"\n' "${REG_EXPIRY//\"/\\\"}"; fi
-    } > "$ENV_FILE"
+    } >"$ENV_FILE"
   )
   chmod 600 "$ENV_FILE"
 
@@ -1098,13 +1208,11 @@ do_status() {
   echo ""
 
   # Check files
-  local files_ok=true
   for f in .env.runtime docker-compose.yml; do
     if [ -f "$SCRIPT_DIR/$f" ]; then
       success "$f exists"
     else
       warn "$f not found"
-      files_ok=false
     fi
   done
 
@@ -1472,8 +1580,8 @@ do_list_versions() {
   load_env "$ENV_FILE"
   migrate_env_if_needed
 
-  [ -z "${CLIENT_ID:-}" ] || [ -z "${CLIENT_SECRET:-}" ] \
-    && die "CLIENT_ID and CLIENT_SECRET must be set in .env"
+  [ -z "${CLIENT_ID:-}" ] || [ -z "${CLIENT_SECRET:-}" ] &&
+    die "CLIENT_ID and CLIENT_SECRET must be set in .env"
 
   [ -z "${TSG_ID:-}" ] && { TSG_ID=$(extract_tsg_id "$CLIENT_ID") || die "Cannot extract TSG_ID"; }
   resolve_registry
@@ -1499,8 +1607,8 @@ do_list_versions() {
   echo ""
 
   local tags
-  tags=$(registry_list_tags "$REGISTRY" "$repo" "$TSG_ID" "$REGISTRY_PASSWORD") \
-    || die "Could not list tags from registry."
+  tags=$(registry_list_tags "$REGISTRY" "$repo" "$TSG_ID" "$REGISTRY_PASSWORD") ||
+    die "Could not list tags from registry."
 
   local sorted
   sorted=$(printf '%s\n' "$tags" | semver_sort_desc) || true
@@ -1523,7 +1631,7 @@ do_list_versions() {
       marker=" (${joined%, })"
     fi
     printf "  - %s%s\n" "$tag" "$marker"
-  done <<< "$sorted"
+  done <<<"$sorted"
 
   echo ""
   info "Pin a specific version with:  ./setup-panw-network-client.sh --version TAG"
@@ -1538,7 +1646,10 @@ do_list_versions() {
 # =============================================================================
 
 do_check_update() {
-  [ -f "$ENV_FILE" ] || { echo "error=missing-env"; exit 2; }
+  [ -f "$ENV_FILE" ] || {
+    echo "error=missing-env"
+    exit 2
+  }
   load_env "$ENV_FILE"
   migrate_env_if_needed
 
@@ -1547,14 +1658,26 @@ do_check_update() {
     exit 2
   fi
   if [ -z "${TSG_ID:-}" ]; then
-    TSG_ID=$(extract_tsg_id "$CLIENT_ID" 2>/dev/null) || { echo "error=tsg-id"; exit 2; }
+    TSG_ID=$(extract_tsg_id "$CLIENT_ID" 2>/dev/null) || {
+      echo "error=tsg-id"
+      exit 2
+    }
   fi
 
-  command -v docker &>/dev/null || { echo "error=docker-missing"; exit 2; }
+  command -v docker &>/dev/null || {
+    echo "error=docker-missing"
+    exit 2
+  }
 
   resolve_registry
-  api_authenticate || { echo "error=auth"; exit 2; }
-  discover_image_from_api || { echo "error=image-discovery"; exit 2; }
+  api_authenticate || {
+    echo "error=auth"
+    exit 2
+  }
+  discover_image_from_api || {
+    echo "error=image-discovery"
+    exit 2
+  }
   split_image_path "$IMAGE_PATH"
 
   local latest="$IMAGE_TAG"
@@ -1639,9 +1762,11 @@ do_install() {
   # Refresh registry token if missing, expired, or within 24h of expiry
   local REGISTRY_PASSWORD="${REGISTRY_TOKEN:-}"
   if registry_token_needs_refresh; then
-    [ -n "${REGISTRY_TOKEN:-}" ] \
-      && info "Registry token is expired or near expiry. Refreshing..." \
-      || info "Fetching registry credentials..."
+    if [ -n "${REGISTRY_TOKEN:-}" ]; then
+      info "Registry token is expired or near expiry. Refreshing..."
+    else
+      info "Fetching registry credentials..."
+    fi
     local reg_response reg_expiry
     reg_response=$(api_get_registry_credentials 2>/dev/null) || die "Could not fetch registry credentials. Set REGISTRY_TOKEN in .env."
     REGISTRY_PASSWORD=$(printf '%s' "$reg_response" | json_extract '.token') || die "Invalid registry credentials response."
@@ -1682,7 +1807,7 @@ do_install() {
   # --- Step 2: Docker registry login ---
   step "2" "Docker registry login"
   { set +x; } 2>/dev/null
-  printf '%s\n' "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$TSG_ID" --password-stdin >/dev/null 2>&1 || \
+  printf '%s\n' "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$TSG_ID" --password-stdin >/dev/null 2>&1 ||
     die "Docker login failed. Check registry credentials."
   success "Registry login successful."
 
@@ -1727,16 +1852,16 @@ do_install() {
     info "Tag $IMAGE_TAG already in local Docker store. Skipping pull."
   elif [ "$QUIET" = true ]; then
     local pull_err
-    pull_err=$(docker pull "$FULL_IMAGE" 2>&1 >/dev/null) \
-      || die "Failed to pull image: $FULL_IMAGE${pull_err:+ — $pull_err}"
+    pull_err=$(docker pull "$FULL_IMAGE" 2>&1 >/dev/null) ||
+      die "Failed to pull image: $FULL_IMAGE${pull_err:+ — $pull_err}"
   else
     docker pull "$FULL_IMAGE" || die "Failed to pull image: $FULL_IMAGE"
   fi
 
   # Get image digest — filter by registry in case the same image was also pulled from another region
   local IMAGE_DIGEST
-  IMAGE_DIGEST=$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "$FULL_IMAGE" 2>/dev/null \
-    | grep "^${REGISTRY}/" | head -1 | cut -d@ -f2)
+  IMAGE_DIGEST=$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "$FULL_IMAGE" 2>/dev/null |
+    grep "^${REGISTRY}/" | head -1 | cut -d@ -f2)
   [ -z "$IMAGE_DIGEST" ] && IMAGE_DIGEST="unknown"
   info "Image digest: $IMAGE_DIGEST"
   log_deploy "image_pulled" "image=$FULL_IMAGE digest=$IMAGE_DIGEST"
@@ -1791,7 +1916,8 @@ do_install() {
   done
 
   # .env.runtime (container config) — umask 077 closes the TOCTOU window before chmod
-  ( umask 077
+  (
+    umask 077
     {
       printf '# --- Runtime config (used by the container) ---\n'
       printf 'CLIENT_ID="%s"\n' "${CLIENT_ID//\"/\\\"}"
@@ -1805,10 +1931,10 @@ do_install() {
       printf 'POOL_SIZE="%s"\n' "${POOL_SIZE//\"/\\\"}"
       printf 'RE_AUTH_INTERVAL="%s"\n' "${RE_AUTH_INTERVAL//\"/\\\"}"
       printf 'DISABLE_SSL_VERIFICATION="%s"\n' "${DISABLE_SSL_VERIFICATION//\"/\\\"}"
-      if [ -n "${HTTP_PROXY:-}" ];  then printf 'HTTP_PROXY="%s"\n'  "${HTTP_PROXY//\"/\\\"}";  fi
+      if [ -n "${HTTP_PROXY:-}" ]; then printf 'HTTP_PROXY="%s"\n' "${HTTP_PROXY//\"/\\\"}"; fi
       if [ -n "${HTTPS_PROXY:-}" ]; then printf 'HTTPS_PROXY="%s"\n' "${HTTPS_PROXY//\"/\\\"}"; fi
-      if [ -n "${NO_PROXY:-}" ];    then printf 'NO_PROXY="%s"\n'    "${NO_PROXY//\"/\\\"}";    fi
-    } > "${SCRIPT_DIR}/.env.runtime"
+      if [ -n "${NO_PROXY:-}" ]; then printf 'NO_PROXY="%s"\n' "${NO_PROXY//\"/\\\"}"; fi
+    } >"${SCRIPT_DIR}/.env.runtime"
   )
   chmod 600 "${SCRIPT_DIR}/.env.runtime"
 
@@ -1823,7 +1949,7 @@ do_install() {
     COMPOSE_IMAGE="${FULL_IMAGE%:*}@${IMAGE_DIGEST}"
   fi
 
-  cat > "$SCRIPT_DIR/docker-compose.yml" <<EOF
+  cat >"$SCRIPT_DIR/docker-compose.yml" <<EOF
 services:
   panw-network-client:
     # tag for reference: ${FULL_IMAGE}
@@ -1871,7 +1997,7 @@ EOF
   log_deploy "install" "image=$FULL_IMAGE digest=$IMAGE_DIGEST"
 
   # Save digest for up-to-date check
-  printf '%s' "$IMAGE_DIGEST" > "$SCRIPT_DIR/.image-digest"
+  printf '%s' "$IMAGE_DIGEST" >"$SCRIPT_DIR/.image-digest"
   chmod 600 "$SCRIPT_DIR/.image-digest"
 
   # --- Step 7: Verify ---
@@ -1982,11 +2108,11 @@ fi
 require_basics
 
 case "$MODE" in
-  init)           do_init ;;
-  status)         do_status ;;
-  validate)       do_validate ;;
-  diagnose)       do_diagnose ;;
-  list-versions)  do_list_versions ;;
-  check-update)   do_check_update ;;
-  install)        do_install ;;
+  init) do_init ;;
+  status) do_status ;;
+  validate) do_validate ;;
+  diagnose) do_diagnose ;;
+  list-versions) do_list_versions ;;
+  check-update) do_check_update ;;
+  install) do_install ;;
 esac
