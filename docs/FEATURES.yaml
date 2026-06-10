@@ -1,0 +1,63 @@
+project:
+  name: ai-redteam-network-client-docker
+  version: "0.1.12"
+  product_goal: >
+    One-command Docker Compose installer for the PANW AI Red Teaming Network Channel client. The shipped surface (CLI modes FR1-FR10) is documented in docs/PRD.md. This file tracks only planned / open work, not delivered features.
+
+conventions:
+  statuses: [todo, in_progress, blocked, done]
+  priorities: [must, should, could]
+  rules:
+    - Implement one feature at a time; do not silently expand scope.
+    - Use plan mode before any multi-file or architectural change.
+    - Add or update tests/validation for every behavior change.
+    - Keep ShellCheck clean and shfmt-formatted (2-space).
+    - Never write secrets to deploy.log, process listings, or committed files.
+    - Do not mark a feature done until its acceptance criteria pass.
+
+features:
+  - id: F-101
+    title: Harden credential escaping in .env writes
+    priority: should
+    status: todo
+    depends_on: []
+    description: >
+      Current .env credential escaping handles the double-quote character but not backticks or $(...) command substitution. A Client Secret containing those could be mis-stored or, when the file is sourced, execute. Make the writer fully safe against shell metacharacters.
+    implementation_notes:
+      - Audit every site that writes a credential into .env / .env.runtime.
+      - Prefer single-quote wrapping with proper single-quote escaping, or a printf %q strategy, over hand-rolled double-quote escaping.
+      - Verify round-trip load_env reads back the exact secret value.
+    acceptance:
+      - Secrets containing backticks, $(), single and double quotes round-trip intact through write then load_env.
+      - No code path allows a secret value to be evaluated as a shell command.
+      - A test fixture covers metacharacter-laden secrets.
+
+  - id: F-102
+    title: Scope secret env vars to the API call, not all children
+    priority: should
+    status: todo
+    depends_on: []
+    description: >
+      load_env exports secrets into the environment of every child process the script spawns, widening exposure beyond the calls that need them. Narrow the scope so credentials reach only the specific curl/docker invocations that require them.
+    implementation_notes:
+      - Identify which children genuinely need CLIENT_SECRET / REGISTRY_PASSWORD.
+      - Prefer per-invocation env (env VAR=... cmd) or the existing --header @file pattern over process-wide export.
+      - Keep the change behavior-preserving for the install/validate path.
+    acceptance:
+      - Secrets are not present in the environment of unrelated child processes.
+      - Install, validate, and list-versions paths still function.
+      - No secret appears in a child process environment dump in tests.
+
+  - id: F-103
+    title: Guard against .gitignore regression in CI
+    priority: could
+    status: todo
+    depends_on: []
+    description: >
+      The .gitignore protecting generated secrets (.env, .env.runtime, docker-compose.yml, deploy.log) has regressed before. Add a cheap CI guard so a future change cannot start tracking those paths unnoticed.
+    implementation_notes:
+      - Add a lint/CI step asserting the sensitive paths are ignored (git check-ignore) and not tracked (git ls-files).
+      - Keep it SHA-pinned like the rest of the workflows.
+    acceptance:
+      - CI fails if any of .env, .env.runtime, docker-compose.yml, deploy.log becomes tracked or un-ignored.
+      - The check runs on push and PR.
