@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.12] - 2026-06-10
+
+### Changed
+- Tooling only, no behavior change. The script now passes ShellCheck clean and is formatted with shfmt (2-space indent). A CI lint workflow runs both on every push and pull request. Shebang switched to `#!/usr/bin/env bash` for portability, and three unused variables plus one fragile `A && B || C` idiom were removed.
+
 ## [0.1.11] - 2026-06-09
 
 ### Fixed
