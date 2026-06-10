@@ -1,0 +1,6 @@
+# Color output uses ANSI escapes stored in single-quoted vars (RED/GREEN/BOLD/NC).
+# Those escapes must live in the printf format string to be interpreted; moving
+# them to %s args would print the escapes literally. All such call sites use
+# developer-controlled banner text, never user input, so format-injection risk
+# does not apply.
+disable=SC2059

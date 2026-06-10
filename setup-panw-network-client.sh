@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # =============================================================================
@@ -447,7 +447,7 @@ registry_list_tags() {
   [ -z "$registry" ] || [ -z "$image_name" ] || [ -z "$tsg_id" ] || [ -z "$password" ] && return 1
 
   local tags_url="https://${registry}/v2/${image_name}/tags/list"
-  local challenge http_code response
+  local http_code response
 
   debug "registry_list_tags: GET $tags_url (user=${tsg_id})"
 
@@ -475,10 +475,10 @@ registry_list_tags() {
     debug "registry_list_tags: basic auth got 401, attempting bearer challenge"
     local hdr_file
     hdr_file=$(new_auth_tmp) || return 1
-    challenge=$(curl --silent --show-error \
+    curl --silent --show-error \
       --proto "=https" --connect-timeout 10 --max-time 15 \
       -D "$hdr_file" -o /dev/null \
-      "$tags_url" 2>/dev/null || true)
+      "$tags_url" 2>/dev/null || true
     local www_auth
     www_auth=$(grep -i '^www-authenticate:' "$hdr_file" 2>/dev/null | head -1 | tr -d '\r') || true
     rm -f "$hdr_file"
@@ -634,7 +634,7 @@ select_channel() {
   local selectable_ids=()
   local selectable_names=()
 
-  while IFS=$'\t' read -r uuid name status last_online; do
+  while IFS=$'\t' read -r uuid name status _last_online; do
     if [ "$status" = "ONLINE" ]; then
       printf "     %s  %-30s ${GREEN}ONLINE${NC}  (in use)\n" "-" "$name"
     else
@@ -1098,13 +1098,11 @@ do_status() {
   echo ""
 
   # Check files
-  local files_ok=true
   for f in .env.runtime docker-compose.yml; do
     if [ -f "$SCRIPT_DIR/$f" ]; then
       success "$f exists"
     else
       warn "$f not found"
-      files_ok=false
     fi
   done
 
@@ -1639,9 +1637,11 @@ do_install() {
   # Refresh registry token if missing, expired, or within 24h of expiry
   local REGISTRY_PASSWORD="${REGISTRY_TOKEN:-}"
   if registry_token_needs_refresh; then
-    [ -n "${REGISTRY_TOKEN:-}" ] \
-      && info "Registry token is expired or near expiry. Refreshing..." \
-      || info "Fetching registry credentials..."
+    if [ -n "${REGISTRY_TOKEN:-}" ]; then
+      info "Registry token is expired or near expiry. Refreshing..."
+    else
+      info "Fetching registry credentials..."
+    fi
     local reg_response reg_expiry
     reg_response=$(api_get_registry_credentials 2>/dev/null) || die "Could not fetch registry credentials. Set REGISTRY_TOKEN in .env."
     REGISTRY_PASSWORD=$(printf '%s' "$reg_response" | json_extract '.token') || die "Invalid registry credentials response."
