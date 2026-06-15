@@ -49,7 +49,7 @@ gh attestation verify setup-panw-network-client.sh \
 
 You provide:
 
-1. **Region** — Americas (US), Europe (NL), or Asia Pacific (SG)
+1. **Region** — Americas (US), Europe (NL), Asia Pacific (SG), or Asia Pacific (JP)
 2. **Client ID** — from the service account in the portal
 3. **Client Secret** — from the service account in the portal
 4. **Channel** — pick from the list returned by the API (or create a new one)
@@ -255,7 +255,8 @@ Outbound HTTPS (TCP/443):
 | `api.sase.paloaltonetworks.com` | Always | API (channels, credentials, stats) |
 | `registry.ai-red-teaming.paloaltonetworks.com` | Setup/Update | Image pull (US) |
 | `registry-nl.ai-red-teaming.paloaltonetworks.com` | Setup/Update | Image pull (Europe) |
-| `registry-sg.ai-red-teaming.paloaltonetworks.com` | Setup/Update | Image pull (Asia Pacific) |
+| `registry-sg.ai-red-teaming.paloaltonetworks.com` | Setup/Update | Image pull (Asia Pacific — Singapore) |
+| `registry-jp.ai-red-teaming.paloaltonetworks.com` | Setup/Update | Image pull (Asia Pacific — Japan) |
 
 One registry per region.
 

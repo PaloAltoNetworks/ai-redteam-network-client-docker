@@ -32,13 +32,14 @@ set -euo pipefail
 
 # --- Constants ---
 
-SCRIPT_VERSION="0.1.12"
+SCRIPT_VERSION="0.1.13"
 REGISTRY_DEFAULT="registry.ai-red-teaming.paloaltonetworks.com"
 REGISTRY="$REGISTRY_DEFAULT"
 KNOWN_REGISTRIES=(
   "us|registry.ai-red-teaming.paloaltonetworks.com|Americas (US)"
   "nl|registry-nl.ai-red-teaming.paloaltonetworks.com|Europe (Netherlands)"
   "sg|registry-sg.ai-red-teaming.paloaltonetworks.com|Asia Pacific (Singapore)"
+  "jp|registry-jp.ai-red-teaming.paloaltonetworks.com|Asia Pacific (Japan)"
 )
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
@@ -801,6 +802,7 @@ resolve_registry() {
     us) REGISTRY="registry.ai-red-teaming.paloaltonetworks.com" ;;
     nl) REGISTRY="registry-nl.ai-red-teaming.paloaltonetworks.com" ;;
     sg) REGISTRY="registry-sg.ai-red-teaming.paloaltonetworks.com" ;;
+    jp) REGISTRY="registry-jp.ai-red-teaming.paloaltonetworks.com" ;;
     *) REGISTRY="$REGISTRY_DEFAULT" ;;
   esac
 }
@@ -822,7 +824,7 @@ select_region() {
 
   local choice
   while true; do
-    printf "  Select region [1-3]: "
+    printf "  Select region [1-4]: "
     read -r choice
     case "$choice" in
       1)
@@ -837,7 +839,11 @@ select_region() {
         REGION="sg"
         break
         ;;
-      *) warn "Invalid selection. Enter 1, 2, or 3." ;;
+      4)
+        REGION="jp"
+        break
+        ;;
+      *) warn "Invalid selection. Enter 1, 2, 3, or 4." ;;
     esac
   done
 
@@ -1047,6 +1053,7 @@ migrate_env_if_needed() {
     case "${REGISTRY_HOST:-}" in
       *-nl.*) REGION="nl" ;;
       *-sg.*) REGION="sg" ;;
+      *-jp.*) REGION="jp" ;;
       *) REGION="us" ;;
     esac
 
