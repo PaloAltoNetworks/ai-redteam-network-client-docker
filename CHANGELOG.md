@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.13] - 2026-06-15
+
+### Added
+- Japan region (`jp`). `--init` now offers Asia Pacific (Japan), resolving to `registry-jp.ai-red-teaming.paloaltonetworks.com`.
+
 ## [0.1.12] - 2026-06-10
 
 ### Changed
