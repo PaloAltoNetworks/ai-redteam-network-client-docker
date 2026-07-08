@@ -32,7 +32,7 @@ set -euo pipefail
 
 # --- Constants ---
 
-SCRIPT_VERSION="0.1.13"
+SCRIPT_VERSION="0.2.0"
 REGISTRY_DEFAULT="registry.ai-red-teaming.paloaltonetworks.com"
 REGISTRY="$REGISTRY_DEFAULT"
 KNOWN_REGISTRIES=(
@@ -622,6 +622,17 @@ registry_list_tags() {
 # Sort semver tags descending (newest first). Filters to strict X.Y.Z format.
 semver_sort_desc() {
   grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V -r
+}
+
+# Returns 0 if $1 >= $2 (semver, X.Y.Z only).
+version_ge() {
+  local a="$1" b="$2"
+  # equal fast-path
+  [ "$a" = "$b" ] && return 0
+  # highest of the two, sorted ascending; if a comes last, a >= b
+  local highest
+  highest=$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1)
+  [ "$highest" = "$a" ]
 }
 
 # Returns 0 when REGISTRY_TOKEN is missing, has no expiry, or expires within 24h.
@@ -1805,6 +1816,9 @@ do_install() {
     info "  1. docker login to $REGISTRY"
     info "  2. docker pull $FULL_IMAGE"
     info "  3. Generate: .env.runtime, docker-compose.yml"
+    if [ "${ADAPTER_SIDECAR_ENABLED:-false}" = "true" ]; then
+      info "  3a. Add adapter sidecar service: ${ADAPTER_SIDECAR_IMAGE:-<unset>}"
+    fi
     info "  4. Start container with docker compose"
     echo ""
     info "No changes were made."
@@ -1906,12 +1920,27 @@ do_install() {
   local RE_AUTH_INTERVAL="${RE_AUTH_INTERVAL:-5m}"
   local DISABLE_SSL_VERIFICATION="${DISABLE_SSL_VERIFICATION:-false}"
 
+  # Adapter sidecar (available in client 1.4.0+)
+  local ADAPTER_SIDECAR_ENABLED="${ADAPTER_SIDECAR_ENABLED:-false}"
+  local ADAPTER_SIDECAR_IMAGE="${ADAPTER_SIDECAR_IMAGE:-}"
+  local ADAPTER_SIDECAR_URL="${ADAPTER_SIDECAR_URL:-http://localhost:8010}"
+
   if [ "${DISABLE_SSL_VERIFICATION}" = "true" ]; then
     echo ""
     warn "DISABLE_SSL_VERIFICATION is enabled (Custom SSL mode)."
     warn "This is intended for on-premises or private cloud deployments"
     warn "with self-signed or internal CA certificates."
     echo ""
+  fi
+
+  if [ "${ADAPTER_SIDECAR_ENABLED}" = "true" ]; then
+    if [ -z "${ADAPTER_SIDECAR_IMAGE}" ]; then
+      die "ADAPTER_SIDECAR_ENABLED=true requires ADAPTER_SIDECAR_IMAGE to be set in .env"
+    fi
+    if ! version_ge "${IMAGE_TAG:-0.0.0}" "1.4.0"; then
+      warn "ADAPTER_SIDECAR_ENABLED=true requires client image 1.4.0+."
+      warn "Current image tag: ${IMAGE_TAG:-unknown}. Sidecar will be deployed but may not function."
+    fi
   fi
 
   # Backup existing files
@@ -1941,6 +1970,10 @@ do_install() {
       if [ -n "${HTTP_PROXY:-}" ]; then printf 'HTTP_PROXY="%s"\n' "${HTTP_PROXY//\"/\\\"}"; fi
       if [ -n "${HTTPS_PROXY:-}" ]; then printf 'HTTPS_PROXY="%s"\n' "${HTTPS_PROXY//\"/\\\"}"; fi
       if [ -n "${NO_PROXY:-}" ]; then printf 'NO_PROXY="%s"\n' "${NO_PROXY//\"/\\\"}"; fi
+      if [ "${ADAPTER_SIDECAR_ENABLED}" = "true" ]; then
+        printf 'ADAPTER_SIDECAR_ENABLED="true"\n'
+        printf 'ADAPTER_SIDECAR_URL="%s"\n' "${ADAPTER_SIDECAR_URL//\"/\\\"}"
+      fi
     } >"${SCRIPT_DIR}/.env.runtime"
   )
   chmod 600 "${SCRIPT_DIR}/.env.runtime"
@@ -1981,6 +2014,53 @@ services:
         max-size: "10m"
         max-file: "3"
 EOF
+
+  # 1.4.0+ switched from distroless (static) to busybox — shell and kill are
+  # available, so a lightweight procfs healthcheck is now viable.
+  if version_ge "${IMAGE_TAG:-0.0.0}" "1.4.0"; then
+    cat >>"$SCRIPT_DIR/docker-compose.yml" <<'EOF'
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          kill -0 1 2>/dev/null || exit 1
+          grep -q '^State:[[:space:]]*Z' /proc/1/status 2>/dev/null && exit 1
+          exit 0
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+EOF
+    info "Healthcheck enabled (client 1.4.0+ busybox image)"
+  fi
+
+  if [ "${ADAPTER_SIDECAR_ENABLED}" = "true" ]; then
+    cat >>"$SCRIPT_DIR/docker-compose.yml" <<EOF
+
+  panw-adapter-sidecar:
+    image: "${ADAPTER_SIDECAR_IMAGE}"
+    network_mode: "service:panw-network-client"
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+    depends_on:
+      - panw-network-client
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+EOF
+    info "Adapter sidecar service added (image: ${ADAPTER_SIDECAR_IMAGE})"
+  fi
 
   success "docker-compose.yml created."
 

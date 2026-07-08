@@ -44,7 +44,9 @@ No source tree — the whole tool is `setup-panw-network-client.sh`. Internal or
 
 ## Container hardening
 
-The generated `docker-compose.yml` applies: `read_only: true`, `security_opt: [no-new-privileges:true]`, `cap_drop: [ALL]`, `mem_limit: 512m`, `cpus: 1.0`, `pids_limit: 256`, `restart: unless-stopped`. No healthcheck (distroless image — see [DECISIONS.md](DECISIONS.md) ADR-005).
+The generated `docker-compose.yml` applies: `read_only: true`, `security_opt: [no-new-privileges:true]`, `cap_drop: [ALL]`, `mem_limit: 512m`, `cpus: 1.0`, `pids_limit: 256`, `restart: unless-stopped`. A procfs healthcheck is added for image `1.4.0+` (busybox base); omitted for older distroless builds (see [DECISIONS.md](DECISIONS.md) ADR-005).
+
+When `ADAPTER_SIDECAR_ENABLED=true` in `.env`, a second `panw-adapter-sidecar` service is appended with `network_mode: service:panw-network-client` (shared network namespace). Same hardening flags apply. Requires client `1.4.0+` (see ADR-008).
 
 ## Security model
 

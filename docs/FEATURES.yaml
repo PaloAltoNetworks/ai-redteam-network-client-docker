@@ -1,6 +1,6 @@
 project:
   name: ai-redteam-network-client-docker
-  version: "0.1.13"
+  version: "0.2.0"
   product_goal: >
     One-command Docker Compose installer for the PANW AI Red Teaming Network Channel client. The shipped surface (CLI modes FR1-FR10) is documented in docs/PRD.md. This file tracks only planned / open work, not delivered features.
 
