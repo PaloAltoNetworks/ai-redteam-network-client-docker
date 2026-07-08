@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-07-08
+
+### Added
+- Opt-in adapter sidecar for custom model adapters (client 1.4.0+). Set `ADAPTER_SIDECAR_ENABLED=true` and `ADAPTER_SIDECAR_IMAGE` in `.env` to append a second `panw-adapter-sidecar` service to the generated `docker-compose.yml`. It shares the client's network namespace (`network_mode: service:panw-network-client`), so the client reaches the adapter at `ADAPTER_SIDECAR_URL` (default `http://localhost:8010`) without exposing any port. The installer warns if the client image is older than 1.4.0, since the binary ignores these vars below that version.
+- Container healthcheck restored for client images `1.4.0+`. The base image switched from distroless `static` to Chainguard `busybox` (ships `sh`, `kill`, `grep`), so the installer emits a lightweight procfs healthcheck (`kill -0 1` plus a zombie-state check) gated on `IMAGE_TAG >= 1.4.0`. Older distroless builds still get no healthcheck; `restart: unless-stopped` covers crash recovery for all versions.
+
 ## [0.1.13] - 2026-06-15
 
 ### Added
