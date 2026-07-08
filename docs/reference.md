@@ -131,6 +131,18 @@ Override in `.env` and re-run the script (or edit `.env.runtime` and restart):
 | `RE_AUTH_INTERVAL` | `5m` | Re-authentication frequency |
 | `DISABLE_SSL_VERIFICATION` | `false` | **Must be `false` in production** |
 
+### Adapter Sidecar (client 1.4.0+)
+
+Deploy a custom model adapter alongside the network client. Both containers share a network namespace so the client reaches the adapter at `localhost:8010` without exposing any port.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ADAPTER_SIDECAR_ENABLED` | `false` | Set to `true` to enable |
+| `ADAPTER_SIDECAR_IMAGE` | _(required when enabled)_ | Full image reference, e.g. `my-registry/my-adapter:1.0.0` |
+| `ADAPTER_SIDECAR_URL` | `http://localhost:8010` | URL the client uses to reach the adapter |
+
+The installer warns if the client image is older than 1.4.0, since the binary ignores these vars below that version.
+
 ### Advanced Overrides
 
 | Variable | Purpose |
@@ -188,9 +200,7 @@ docker stats panw-network-client             # Resource usage
 
 ### Health Monitoring
 
-The client image is distroless (no shell or coreutils), so no in-container Docker
-healthcheck is defined. `restart: unless-stopped` handles crash recovery, and the
-client auto-reconnects on websocket drops. Monitor health from the host via logs:
+Client images `1.4.0+` include a busybox base with `sh` and `kill`, so the installer generates a Docker healthcheck automatically. Older (distroless) images have no healthcheck; `restart: unless-stopped` handles crash recovery for all versions. The client auto-reconnects on websocket drops. Monitor health from the host via logs:
 
 ```bash
 CID=$(docker ps -qf name=panw-network-client)
