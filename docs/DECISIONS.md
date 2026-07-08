@@ -34,13 +34,13 @@ Crane was used historically to avoid Docker registry auth friction but added a p
 
 Separating them keeps setup-only material (registry token, region) out of the container's environment and lets the runtime file be regenerated without touching operator input.
 
-## ADR-005 — No in-container healthcheck (distroless image)
+## ADR-005 — Healthcheck gated on image base (distroless vs busybox)
 
-**Status:** accepted (supersedes earlier procfs healthcheck design)
+**Status:** updated (1.4.0)
 
-The client image is distroless — no shell, no coreutils — so an in-container Docker `healthcheck` has nothing to execute. It was removed (PR #35).
+Client images before 1.4.0 used a Chainguard `static` (distroless) base — no shell, no coreutils — so no in-container healthcheck was possible. It was removed in PR #35.
 
-`restart: unless-stopped` covers crash recovery and the client auto-reconnects on websocket drops. Health is monitored from the host via logs (see reference.md). An earlier procfs-based composite check was designed but is dead given the distroless base.
+Starting with 1.4.0 the image switched to Chainguard `busybox`, which ships `sh`, `kill`, and `grep`. The installer now emits a lightweight procfs healthcheck (`kill -0 1` + zombie check) when `IMAGE_TAG >= 1.4.0`, and omits it for older distroless builds. `restart: unless-stopped` still covers crash recovery for all versions.
 
 ## ADR-006 — No telemetry / phone-home
 
@@ -49,6 +49,16 @@ The client image is distroless — no shell, no coreutils — so an in-container
 The script reports nothing back to PANW. Metrics like "time to connect" are gauged out-of-band (supported onboardings, release download counts), not auto-captured.
 
 A network client that silently phones home is a trust problem for a security product deployed inside customer infra. If a hard metric is ever required, it needs an explicit opt-in telemetry decision first.
+
+## ADR-008 — Adapter sidecar as an opt-in second Compose service
+
+**Status:** accepted
+
+The client binary (1.4.0+) supports a custom model adapter sidecar via two env vars: `ADAPTER_SIDECAR_ENABLED` and `ADAPTER_SIDECAR_URL` (default `http://localhost:8010`). In the Helm chart this maps to `--set adapterSidecar.enabled=true`.
+
+In the Docker Compose installer the sidecar is an opt-in second service in the generated `docker-compose.yml`. When `ADAPTER_SIDECAR_ENABLED=true` in `.env`, the installer appends a `panw-adapter-sidecar` service with `network_mode: service:panw-network-client` so both containers share the same network namespace — `localhost:8010` routing works without exposing any port. The sidecar image is customer-supplied via `ADAPTER_SIDECAR_IMAGE`.
+
+A `version_ge` guard warns (but does not block) if the client image is older than 1.4.0, since the binary will silently ignore the env vars below that version.
 
 ## ADR-007 — Sigstore attestation, no `.sha256`
 
