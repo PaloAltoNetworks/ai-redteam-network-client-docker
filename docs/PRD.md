@@ -81,7 +81,7 @@ Priority key: **P0** core install path, must ship; **P1** important, fast-follow
 
 - **Security.** API credentials passed via `--header @file` (never in `ps`); credential functions disable shell tracing; secret files `chmod 600` written under `umask 077`; HTTPS-only (`--proto =https`); SHA256-pinned helper binaries; image digest logged.
 - **Performance / resource envelope.** Container is capped by the generated compose file: `mem_limit 512m`, `cpus 1.0`, `pids_limit 256`. These are the hard ceilings the daemon must run within; treat regressions above them as defects. Bandwidth tracks scan volume and is not separately throttled.
-- **Portability.** Linux (x86_64, aarch64) and macOS (Intel, Apple Silicon); Docker 20.10+ with Compose v1 or v2; depends only on `curl` + `jq` at startup. `--init` works on hosts without Docker.
+- **Portability.** The script runs on Linux (x86_64, aarch64) and macOS (Intel, Apple Silicon); Docker 20.10+ with Compose v1 or v2; depends only on `curl` + `jq` at startup. `--init` works on hosts without Docker. The client image is published `linux/amd64` only (no multi-arch index on any tag), so aarch64 and Apple Silicon hosts run the container under emulation and fail where emulation is unavailable.
 - **Robustness.** `set -euo pipefail` throughout; guarded command substitutions so a no-match `grep` cannot abort the run; `die()` for fatal errors with clean exit.
 - **Auditability.** Every install and pull appended to `deploy.log` with timestamp and image digest, no secrets.
 - **Maintainability.** Single script, ShellCheck-clean, shfmt-formatted (2-space), CI lint on push and PR. Decomposition threshold ~1800 lines.

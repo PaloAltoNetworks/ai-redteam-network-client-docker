@@ -79,11 +79,16 @@ Pattern-matches container logs against:
 | Requirement | Details |
 |---|---|
 | **Docker** | 20.10+, with Docker Compose (v1 or v2) |
-| **OS** | Linux (x86_64, aarch64) or macOS (Intel, Apple Silicon) |
+| **OS** | Linux (x86_64, aarch64) or macOS (Intel, Apple Silicon) — script only; see architecture note below |
+| **Architecture** | Client image is `linux/amd64` only. aarch64 / Apple Silicon hosts run it emulated |
 | **Tools** | `curl`, `jq` |
 | **Network** | Outbound HTTPS to `*.paloaltonetworks.com` |
 
 Before any operational mode runs, the script checks `jq` and `curl` and exits with `Missing required dependencies: <list>` if either is missing, so a missing dependency cannot surface later as an opaque auth error. Docker and Docker Compose are checked by per-mode preflight, so `--init` can still generate `.env` on a host that does not run the container itself.
+
+### Architecture support
+
+Every published tag of the client image is a single `linux/amd64` manifest — there is no multi-arch index, so Docker cannot select an arm64 variant. On Apple Silicon or aarch64 Linux the pull succeeds and the container runs under emulation (Rosetta, or QEMU/binfmt) with a platform-mismatch warning. Where emulation is not configured, the container fails to start. Prefer an x86_64 host for production deployments.
 
 On Ubuntu:
 
