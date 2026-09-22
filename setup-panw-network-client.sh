@@ -231,6 +231,16 @@ detect_compose() {
   fi
 }
 
+# Set COMPOSE to the compose command, or exit 1 when neither v1 nor v2 is installed.
+# Assigns rather than echoes: die() inside a command substitution would only
+# terminate the subshell, leaving the caller with an empty command.
+require_compose() {
+  COMPOSE=$(detect_compose)
+  if [ -z "$COMPOSE" ]; then
+    die "Docker Compose not found"
+  fi
+}
+
 # --- Early dependency gate (runs before any operational mode) ---
 # Tools required by every mode that talks to the API or parses JSON.
 # Docker and Docker Compose are checked by per-mode preflight, so --init can
@@ -881,6 +891,20 @@ running_image_tag() {
   return 0
 }
 
+# Render one tag line with (latest, running, pulled) markers.
+# Args: $1 = prefix (already-formatted list bullet), $2 = tag, $3 = latest,
+#       $4 = running tag, $5 = newline-separated locally-pulled tags.
+print_tag_line() {
+  local prefix="$1" tag="$2" latest="$3" running="$4" local_tags="$5"
+  local markers=()
+  [ "$tag" = "$latest" ] && markers+=("latest")
+  [ "$tag" = "$running" ] && markers+=("running")
+  printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("pulled")
+  local joined=""
+  [ ${#markers[@]} -gt 0 ] && printf -v joined '%s, ' "${markers[@]}"
+  printf '%s%s%s\n' "$prefix" "$tag" "${joined:+ (${joined%, })}"
+}
+
 # Interactive version selection. Uses: VERSION_OVERRIDE, ASSUME_YES, REGISTRY, IMAGE_PATH, TSG_ID, REGISTRY_PASSWORD.
 # Mutates IMAGE_PATH to the selected tag.
 select_image_version() {
@@ -948,16 +972,7 @@ select_image_version() {
   local -a tag_arr=()
   while IFS= read -r tag; do
     tag_arr+=("$tag")
-    local markers=()
-    [ "$tag" = "$latest" ] && markers+=("latest")
-    [ "$tag" = "$running" ] && markers+=("running")
-    printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("pulled")
-    local marker="" joined=""
-    if [ ${#markers[@]} -gt 0 ]; then
-      printf -v joined '%s, ' "${markers[@]}"
-      marker=" (${joined%, })"
-    fi
-    printf "  %d) %s%s\n" "$i" "$tag" "$marker"
+    print_tag_line "$(printf '  %d) ' "$i")" "$tag" "$latest" "$running" "$local_tags"
     i=$((i + 1))
     [ "$i" -gt 20 ] && break
   done <<<"$sorted"
@@ -1183,12 +1198,7 @@ do_status() {
   done
 
   # Check compose
-  local COMPOSE
-  COMPOSE=$(detect_compose)
-  if [ -z "$COMPOSE" ]; then
-    error "Docker Compose not found"
-    return 1
-  fi
+  require_compose
 
   # Check container
   echo ""
@@ -1235,12 +1245,7 @@ do_validate() {
   printf "${BOLD}=============================================${NC}\n"
   echo ""
 
-  local COMPOSE
-  COMPOSE=$(detect_compose)
-  if [ -z "$COMPOSE" ]; then
-    error "Docker Compose not found"
-    return 1
-  fi
+  require_compose
 
   cd "$SCRIPT_DIR"
 
@@ -1298,12 +1303,7 @@ do_diagnose() {
   printf "${BOLD}=============================================${NC}\n"
   echo ""
 
-  local COMPOSE
-  COMPOSE=$(detect_compose)
-  if [ -z "$COMPOSE" ]; then
-    error "Docker Compose not found"
-    return 1
-  fi
+  require_compose
 
   cd "$SCRIPT_DIR"
 
@@ -1587,16 +1587,7 @@ do_list_versions() {
 
   info "Available versions (newest first):"
   while IFS= read -r tag; do
-    local markers=()
-    [ "$tag" = "$latest" ] && markers+=("latest")
-    [ "$tag" = "$running" ] && markers+=("running")
-    printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("pulled")
-    local marker="" joined=""
-    if [ ${#markers[@]} -gt 0 ]; then
-      printf -v joined '%s, ' "${markers[@]}"
-      marker=" (${joined%, })"
-    fi
-    printf "  - %s%s\n" "$tag" "$marker"
+    print_tag_line "  - " "$tag" "$latest" "$running" "$local_tags"
   done <<<"$sorted"
 
   echo ""
@@ -2015,12 +2006,7 @@ EOF
   # --- Step 6: Start ---
   step "6" "Starting the client"
 
-  local COMPOSE
-  COMPOSE=$(detect_compose)
-  if [ -z "$COMPOSE" ]; then
-    error "Docker Compose not found."
-    exit 1
-  fi
+  require_compose
 
   cd "$SCRIPT_DIR"
   if [ "$QUIET" = true ]; then
