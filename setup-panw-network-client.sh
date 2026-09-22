@@ -487,30 +487,21 @@ registry_list_tags() {
   local tags_url="https://${registry}/v2/${image_name}/tags/list"
   local http_code response
 
-  debug "registry_list_tags: GET $tags_url (user=${tsg_id})"
-
   # First attempt: Basic auth
-  local basic_resp curl_rc
+  local basic_resp
   basic_resp=$(curl --silent --show-error \
     --proto "=https" \
     --connect-timeout 10 \
     --max-time 30 \
     -u "${tsg_id}:${password}" \
     --write-out '\n%{http_code}' \
-    "$tags_url" 2>/dev/null)
-  curl_rc=$?
-  if [ "$curl_rc" -ne 0 ]; then
-    debug "registry_list_tags: curl failed (basic auth), rc=$curl_rc"
-    return 1
-  fi
+    "$tags_url" 2>/dev/null) || return 1
 
   http_code=$(printf '%s' "$basic_resp" | tail -1)
   response=$(printf '%s' "$basic_resp" | sed '$d')
-  debug "registry_list_tags: basic-auth http_code=$http_code, response_bytes=${#response}"
 
   # Handle bearer challenge if Basic rejected
   if [ "$http_code" = "401" ]; then
-    debug "registry_list_tags: basic auth got 401, attempting bearer challenge"
     local hdr_file
     hdr_file=$(new_auth_tmp) || return 1
     curl --silent --show-error \
@@ -530,25 +521,18 @@ registry_list_tags() {
     [[ "$www_auth" =~ service=\"([^\"]+)\" ]] && service="${BASH_REMATCH[1]}"
     [[ "$www_auth" =~ scope=\"([^\"]+)\" ]] && scope="${BASH_REMATCH[1]}"
     [ -z "$scope" ] && scope="repository:${image_name}:pull"
-    debug "registry_list_tags: bearer realm=$realm service=$service scope=$scope"
 
     local token_resp bearer
     token_resp=$(curl --silent --show-error \
       --proto "=https" --connect-timeout 10 --max-time 30 \
       -u "${tsg_id}:${password}" \
       --get --data-urlencode "service=${service}" --data-urlencode "scope=${scope}" \
-      "$realm" 2>/dev/null) || {
-      debug "registry_list_tags: token endpoint curl failed"
-      return 1
-    }
+      "$realm" 2>/dev/null) || return 1
     bearer=$(printf '%s' "$token_resp" | json_extract '.token // .access_token') || {
-      debug "registry_list_tags: could not extract bearer token from token response (bytes=${#token_resp})"
+      debug "registry_list_tags: no bearer token in token-endpoint response"
       return 1
     }
-    [ -z "$bearer" ] && {
-      debug "registry_list_tags: bearer token empty"
-      return 1
-    }
+    [ -z "$bearer" ] && return 1
 
     local auth_hdr
     auth_hdr=$(new_auth_tmp) || return 1
@@ -559,13 +543,11 @@ registry_list_tags() {
       --write-out '\n%{http_code}' \
       "$tags_url" 2>/dev/null) || {
       rm -f "$auth_hdr"
-      debug "registry_list_tags: tags fetch with bearer failed"
       return 1
     }
     rm -f "$auth_hdr"
     http_code=$(printf '%s' "$basic_resp" | tail -1)
     response=$(printf '%s' "$basic_resp" | sed '$d')
-    debug "registry_list_tags: bearer-auth http_code=$http_code, response_bytes=${#response}"
   fi
 
   case "$http_code" in
@@ -581,12 +563,6 @@ registry_list_tags() {
     debug "registry_list_tags: jq parse failed, body='$(printf '%s' "$response" | head -c 200)'"
     return 1
   }
-  local n
-  n=$(printf '%s' "$parsed" | grep -c . || true)
-  debug "registry_list_tags: parsed $n tag(s) from .tags[]"
-  if [ "$n" -eq 0 ]; then
-    debug "registry_list_tags: .tags empty/null, raw body='$(printf '%s' "$response" | head -c 200)'"
-  fi
   printf '%s' "$parsed"
 }
 
