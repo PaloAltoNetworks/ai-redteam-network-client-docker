@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-09-22
+
+### Changed
+- Internal refactor only, no behavior change. `api_get_registry_credentials` now goes through `api_call` instead of hand-rolling its own curl invocation, auth-header temp file and status parsing, which also gives that endpoint the retry and 401 re-auth handling it previously lacked. The region-to-registry table is derived solely from `KNOWN_REGISTRIES` rather than being restated in `resolve_registry` and `select_region`, so adding a region is now a one-line change. Two helpers absorb repeated blocks: `require_compose` (four copies) and `print_tag_line` (tag markers in `--list-versions` and the interactive version menu). `--status` queries the container once instead of three times, the install verify step reuses `api_print_channel_status`, and redundant `debug` output in `registry_list_tags` was pruned to the lines that name a distinct failure. Net 104 lines removed.
+
 ## [0.2.0] - 2026-07-08
 
 ### Added

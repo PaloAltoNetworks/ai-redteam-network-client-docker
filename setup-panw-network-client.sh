@@ -32,9 +32,8 @@ set -euo pipefail
 
 # --- Constants ---
 
-SCRIPT_VERSION="0.2.0"
-REGISTRY_DEFAULT="registry.ai-red-teaming.paloaltonetworks.com"
-REGISTRY="$REGISTRY_DEFAULT"
+SCRIPT_VERSION="0.3.0"
+REGISTRY=""
 KNOWN_REGISTRIES=(
   "us|registry.ai-red-teaming.paloaltonetworks.com|Americas (US)"
   "nl|registry-nl.ai-red-teaming.paloaltonetworks.com|Europe (Netherlands)"
@@ -229,6 +228,16 @@ detect_compose() {
     echo "docker-compose"
   else
     echo ""
+  fi
+}
+
+# Set COMPOSE to the compose command, or exit 1 when neither v1 nor v2 is installed.
+# Assigns rather than echoes: die() inside a command substitution would only
+# terminate the subshell, leaving the caller with an empty command.
+require_compose() {
+  COMPOSE=$(detect_compose)
+  if [ -z "$COMPOSE" ]; then
+    die "Docker Compose not found"
   fi
 }
 
@@ -440,12 +449,7 @@ api_call() {
 }
 
 api_list_channels() {
-  local status_filter="${1:-}"
-  local query=""
-  if [ -n "$status_filter" ]; then
-    query="?status=${status_filter}"
-  fi
-  api_call "GET" "/v1/channels${query}"
+  api_call "GET" "/v1/channels"
 }
 
 api_create_channel() {
@@ -469,40 +473,7 @@ api_get_channel() {
 }
 
 api_get_registry_credentials() {
-  { set +x; } 2>/dev/null
-  api_ensure_token || return 1
-
-  local _reg_header_file
-  _reg_header_file=$(new_auth_tmp) || return 1
-
-  printf 'Authorization: Bearer %s\n' "$API_TOKEN" >"$_reg_header_file"
-
-  local raw_response http_code response
-  raw_response=$(curl --silent --show-error \
-    --proto "=https" \
-    --connect-timeout 10 \
-    --max-time 30 \
-    --header @"$_reg_header_file" \
-    --header "Content-Type: application/json" \
-    --request POST \
-    --write-out '\n%{http_code}' \
-    "${MGMT_API_BASE}/v1/registry-credentials" 2>/dev/null) || {
-    rm -f "$_reg_header_file"
-    return 1
-  }
-
-  rm -f "$_reg_header_file"
-
-  http_code=$(printf '%s' "$raw_response" | tail -1)
-  response=$(printf '%s' "$raw_response" | sed '$d')
-
-  case "$http_code" in
-    2[0-9][0-9])
-      printf '%s' "$response"
-      return 0
-      ;;
-    *) return 1 ;;
-  esac
+  api_call "POST" "${MGMT_API_BASE}/v1/registry-credentials"
 }
 
 # Fetch available image tags from the Docker Registry v2 API.
@@ -516,30 +487,21 @@ registry_list_tags() {
   local tags_url="https://${registry}/v2/${image_name}/tags/list"
   local http_code response
 
-  debug "registry_list_tags: GET $tags_url (user=${tsg_id})"
-
   # First attempt: Basic auth
-  local basic_resp curl_rc
+  local basic_resp
   basic_resp=$(curl --silent --show-error \
     --proto "=https" \
     --connect-timeout 10 \
     --max-time 30 \
     -u "${tsg_id}:${password}" \
     --write-out '\n%{http_code}' \
-    "$tags_url" 2>/dev/null)
-  curl_rc=$?
-  if [ "$curl_rc" -ne 0 ]; then
-    debug "registry_list_tags: curl failed (basic auth), rc=$curl_rc"
-    return 1
-  fi
+    "$tags_url" 2>/dev/null) || return 1
 
   http_code=$(printf '%s' "$basic_resp" | tail -1)
   response=$(printf '%s' "$basic_resp" | sed '$d')
-  debug "registry_list_tags: basic-auth http_code=$http_code, response_bytes=${#response}"
 
   # Handle bearer challenge if Basic rejected
   if [ "$http_code" = "401" ]; then
-    debug "registry_list_tags: basic auth got 401, attempting bearer challenge"
     local hdr_file
     hdr_file=$(new_auth_tmp) || return 1
     curl --silent --show-error \
@@ -559,25 +521,18 @@ registry_list_tags() {
     [[ "$www_auth" =~ service=\"([^\"]+)\" ]] && service="${BASH_REMATCH[1]}"
     [[ "$www_auth" =~ scope=\"([^\"]+)\" ]] && scope="${BASH_REMATCH[1]}"
     [ -z "$scope" ] && scope="repository:${image_name}:pull"
-    debug "registry_list_tags: bearer realm=$realm service=$service scope=$scope"
 
     local token_resp bearer
     token_resp=$(curl --silent --show-error \
       --proto "=https" --connect-timeout 10 --max-time 30 \
       -u "${tsg_id}:${password}" \
       --get --data-urlencode "service=${service}" --data-urlencode "scope=${scope}" \
-      "$realm" 2>/dev/null) || {
-      debug "registry_list_tags: token endpoint curl failed"
-      return 1
-    }
+      "$realm" 2>/dev/null) || return 1
     bearer=$(printf '%s' "$token_resp" | json_extract '.token // .access_token') || {
-      debug "registry_list_tags: could not extract bearer token from token response (bytes=${#token_resp})"
+      debug "registry_list_tags: no bearer token in token-endpoint response"
       return 1
     }
-    [ -z "$bearer" ] && {
-      debug "registry_list_tags: bearer token empty"
-      return 1
-    }
+    [ -z "$bearer" ] && return 1
 
     local auth_hdr
     auth_hdr=$(new_auth_tmp) || return 1
@@ -588,13 +543,11 @@ registry_list_tags() {
       --write-out '\n%{http_code}' \
       "$tags_url" 2>/dev/null) || {
       rm -f "$auth_hdr"
-      debug "registry_list_tags: tags fetch with bearer failed"
       return 1
     }
     rm -f "$auth_hdr"
     http_code=$(printf '%s' "$basic_resp" | tail -1)
     response=$(printf '%s' "$basic_resp" | sed '$d')
-    debug "registry_list_tags: bearer-auth http_code=$http_code, response_bytes=${#response}"
   fi
 
   case "$http_code" in
@@ -610,12 +563,6 @@ registry_list_tags() {
     debug "registry_list_tags: jq parse failed, body='$(printf '%s' "$response" | head -c 200)'"
     return 1
   }
-  local n
-  n=$(printf '%s' "$parsed" | grep -c . || true)
-  debug "registry_list_tags: parsed $n tag(s) from .tags[]"
-  if [ "$n" -eq 0 ]; then
-    debug "registry_list_tags: .tags empty/null, raw body='$(printf '%s' "$response" | head -c 200)'"
-  fi
   printf '%s' "$parsed"
 }
 
@@ -809,13 +756,16 @@ resolve_registry() {
     REGISTRY="$REGISTRY_HOST"
     return
   fi
-  case "${REGION:-us}" in
-    us) REGISTRY="registry.ai-red-teaming.paloaltonetworks.com" ;;
-    nl) REGISTRY="registry-nl.ai-red-teaming.paloaltonetworks.com" ;;
-    sg) REGISTRY="registry-sg.ai-red-teaming.paloaltonetworks.com" ;;
-    jp) REGISTRY="registry-jp.ai-red-teaming.paloaltonetworks.com" ;;
-    *) REGISTRY="$REGISTRY_DEFAULT" ;;
-  esac
+  local want="${REGION:-us}" entry
+  for entry in "${KNOWN_REGISTRIES[@]}"; do
+    if [ "${entry%%|*}" = "$want" ]; then
+      local rest="${entry#*|}"
+      REGISTRY="${rest%%|*}"
+      return
+    fi
+  done
+  REGISTRY="${KNOWN_REGISTRIES[0]#*|}"
+  REGISTRY="${REGISTRY%%|*}"
 }
 
 select_region() {
@@ -823,39 +773,23 @@ select_region() {
   printf "  ${BOLD}Select your region:${NC}\n"
   echo ""
 
-  local idx=1
-  for entry in "${KNOWN_REGISTRIES[@]}"; do
-    local rest="${entry#*|}"
-    local reg="${rest%%|*}"
-    local location="${rest##*|}"
-    printf "  [${BOLD}%d${NC}] %-50s %s\n" "$idx" "$location" "$reg"
-    idx=$((idx + 1))
+  local n=${#KNOWN_REGISTRIES[@]} i entry rest
+  for ((i = 0; i < n; i++)); do
+    rest="${KNOWN_REGISTRIES[i]#*|}"
+    printf "  [${BOLD}%d${NC}] %-50s %s\n" "$((i + 1))" "${rest##*|}" "${rest%%|*}"
   done
   echo ""
 
   local choice
   while true; do
-    printf "  Select region [1-4]: "
+    printf "  Select region [1-%d]: " "$n"
     read -r choice
-    case "$choice" in
-      1)
-        REGION="us"
-        break
-        ;;
-      2)
-        REGION="nl"
-        break
-        ;;
-      3)
-        REGION="sg"
-        break
-        ;;
-      4)
-        REGION="jp"
-        break
-        ;;
-      *) warn "Invalid selection. Enter 1, 2, 3, or 4." ;;
-    esac
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$n" ]; then
+      entry="${KNOWN_REGISTRIES[$((choice - 1))]}"
+      REGION="${entry%%|*}"
+      break
+    fi
+    warn "Invalid selection. Enter a number between 1 and $n."
   done
 
   resolve_registry
@@ -933,6 +867,20 @@ running_image_tag() {
   return 0
 }
 
+# Render one tag line with (latest, running, pulled) markers.
+# Args: $1 = prefix (already-formatted list bullet), $2 = tag, $3 = latest,
+#       $4 = running tag, $5 = newline-separated locally-pulled tags.
+print_tag_line() {
+  local prefix="$1" tag="$2" latest="$3" running="$4" local_tags="$5"
+  local markers=()
+  [ "$tag" = "$latest" ] && markers+=("latest")
+  [ "$tag" = "$running" ] && markers+=("running")
+  printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("pulled")
+  local joined=""
+  [ ${#markers[@]} -gt 0 ] && printf -v joined '%s, ' "${markers[@]}"
+  printf '%s%s%s\n' "$prefix" "$tag" "${joined:+ (${joined%, })}"
+}
+
 # Interactive version selection. Uses: VERSION_OVERRIDE, ASSUME_YES, REGISTRY, IMAGE_PATH, TSG_ID, REGISTRY_PASSWORD.
 # Mutates IMAGE_PATH to the selected tag.
 select_image_version() {
@@ -1000,16 +948,7 @@ select_image_version() {
   local -a tag_arr=()
   while IFS= read -r tag; do
     tag_arr+=("$tag")
-    local markers=()
-    [ "$tag" = "$latest" ] && markers+=("latest")
-    [ "$tag" = "$running" ] && markers+=("running")
-    printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("pulled")
-    local marker="" joined=""
-    if [ ${#markers[@]} -gt 0 ]; then
-      printf -v joined '%s, ' "${markers[@]}"
-      marker=" (${joined%, })"
-    fi
-    printf "  %d) %s%s\n" "$i" "$tag" "$marker"
+    print_tag_line "$(printf '  %d) ' "$i")" "$tag" "$latest" "$running" "$local_tags"
     i=$((i + 1))
     [ "$i" -gt 20 ] && break
   done <<<"$sorted"
@@ -1235,24 +1174,16 @@ do_status() {
   done
 
   # Check compose
-  local COMPOSE
-  COMPOSE=$(detect_compose)
-  if [ -z "$COMPOSE" ]; then
-    error "Docker Compose not found"
-    return 1
-  fi
+  require_compose
 
   # Check container
   echo ""
   cd "$SCRIPT_DIR"
-  if $COMPOSE ps --format json 2>/dev/null | grep -q "panw-network-client"; then
-    local state
-    state=$($COMPOSE ps --format json 2>/dev/null | grep "panw-network-client" || true)
-    success "Container is running"
-    echo "$state" | head -3
-  elif $COMPOSE ps 2>/dev/null | grep -q "panw-network-client"; then
+  local state
+  state=$($COMPOSE ps 2>/dev/null | grep "panw-network-client" || true)
+  if [ -n "$state" ]; then
     success "Container found"
-    $COMPOSE ps 2>/dev/null | grep "panw-network-client"
+    printf '%s\n' "$state" | head -3
   else
     warn "Container not running"
   fi
@@ -1287,12 +1218,7 @@ do_validate() {
   printf "${BOLD}=============================================${NC}\n"
   echo ""
 
-  local COMPOSE
-  COMPOSE=$(detect_compose)
-  if [ -z "$COMPOSE" ]; then
-    error "Docker Compose not found"
-    return 1
-  fi
+  require_compose
 
   cd "$SCRIPT_DIR"
 
@@ -1350,12 +1276,7 @@ do_diagnose() {
   printf "${BOLD}=============================================${NC}\n"
   echo ""
 
-  local COMPOSE
-  COMPOSE=$(detect_compose)
-  if [ -z "$COMPOSE" ]; then
-    error "Docker Compose not found"
-    return 1
-  fi
+  require_compose
 
   cd "$SCRIPT_DIR"
 
@@ -1639,16 +1560,7 @@ do_list_versions() {
 
   info "Available versions (newest first):"
   while IFS= read -r tag; do
-    local markers=()
-    [ "$tag" = "$latest" ] && markers+=("latest")
-    [ "$tag" = "$running" ] && markers+=("running")
-    printf '%s\n' "$local_tags" | grep -qxF "$tag" && [ "$tag" != "$running" ] && markers+=("pulled")
-    local marker="" joined=""
-    if [ ${#markers[@]} -gt 0 ]; then
-      printf -v joined '%s, ' "${markers[@]}"
-      marker=" (${joined%, })"
-    fi
-    printf "  - %s%s\n" "$tag" "$marker"
+    print_tag_line "  - " "$tag" "$latest" "$running" "$local_tags"
   done <<<"$sorted"
 
   echo ""
@@ -2067,12 +1979,7 @@ EOF
   # --- Step 6: Start ---
   step "6" "Starting the client"
 
-  local COMPOSE
-  COMPOSE=$(detect_compose)
-  if [ -z "$COMPOSE" ]; then
-    error "Docker Compose not found."
-    exit 1
-  fi
+  require_compose
 
   cd "$SCRIPT_DIR"
   if [ "$QUIET" = true ]; then
@@ -2138,18 +2045,7 @@ EOF
     # API-based verification
     if [ "$API_AVAILABLE" = true ] && [ -n "${CHANNEL_ID:-}" ]; then
       echo ""
-      local ch_info
-      ch_info=$(api_get_channel "$CHANNEL_ID" 2>/dev/null) || ch_info=""
-      if [ -n "$ch_info" ]; then
-        local ch_status ch_name
-        ch_status=$(printf '%s' "$ch_info" | json_extract '.status') || ch_status="unknown"
-        ch_name=$(printf '%s' "$ch_info" | json_extract '.name') || ch_name=""
-        if [ "$ch_status" = "ONLINE" ]; then
-          success "API confirms channel is ONLINE: ${ch_name:-$CHANNEL_ID}"
-        else
-          info "API reports channel status: $ch_status"
-        fi
-      fi
+      api_print_channel_status verbose || true
     fi
   fi
 
