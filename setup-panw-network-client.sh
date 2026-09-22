@@ -32,7 +32,7 @@ set -euo pipefail
 
 # --- Constants ---
 
-SCRIPT_VERSION="0.2.0"
+SCRIPT_VERSION="0.3.0"
 REGISTRY=""
 KNOWN_REGISTRIES=(
   "us|registry.ai-red-teaming.paloaltonetworks.com|Americas (US)"
