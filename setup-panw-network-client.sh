@@ -1203,14 +1203,11 @@ do_status() {
   # Check container
   echo ""
   cd "$SCRIPT_DIR"
-  if $COMPOSE ps --format json 2>/dev/null | grep -q "panw-network-client"; then
-    local state
-    state=$($COMPOSE ps --format json 2>/dev/null | grep "panw-network-client" || true)
-    success "Container is running"
-    echo "$state" | head -3
-  elif $COMPOSE ps 2>/dev/null | grep -q "panw-network-client"; then
+  local state
+  state=$($COMPOSE ps 2>/dev/null | grep "panw-network-client" || true)
+  if [ -n "$state" ]; then
     success "Container found"
-    $COMPOSE ps 2>/dev/null | grep "panw-network-client"
+    printf '%s\n' "$state" | head -3
   else
     warn "Container not running"
   fi
@@ -2072,18 +2069,7 @@ EOF
     # API-based verification
     if [ "$API_AVAILABLE" = true ] && [ -n "${CHANNEL_ID:-}" ]; then
       echo ""
-      local ch_info
-      ch_info=$(api_get_channel "$CHANNEL_ID" 2>/dev/null) || ch_info=""
-      if [ -n "$ch_info" ]; then
-        local ch_status ch_name
-        ch_status=$(printf '%s' "$ch_info" | json_extract '.status') || ch_status="unknown"
-        ch_name=$(printf '%s' "$ch_info" | json_extract '.name') || ch_name=""
-        if [ "$ch_status" = "ONLINE" ]; then
-          success "API confirms channel is ONLINE: ${ch_name:-$CHANNEL_ID}"
-        else
-          info "API reports channel status: $ch_status"
-        fi
-      fi
+      api_print_channel_status verbose || true
     fi
   fi
 
