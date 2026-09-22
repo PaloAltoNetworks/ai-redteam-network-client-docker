@@ -440,12 +440,7 @@ api_call() {
 }
 
 api_list_channels() {
-  local status_filter="${1:-}"
-  local query=""
-  if [ -n "$status_filter" ]; then
-    query="?status=${status_filter}"
-  fi
-  api_call "GET" "/v1/channels${query}"
+  api_call "GET" "/v1/channels"
 }
 
 api_create_channel() {
@@ -469,40 +464,7 @@ api_get_channel() {
 }
 
 api_get_registry_credentials() {
-  { set +x; } 2>/dev/null
-  api_ensure_token || return 1
-
-  local _reg_header_file
-  _reg_header_file=$(new_auth_tmp) || return 1
-
-  printf 'Authorization: Bearer %s\n' "$API_TOKEN" >"$_reg_header_file"
-
-  local raw_response http_code response
-  raw_response=$(curl --silent --show-error \
-    --proto "=https" \
-    --connect-timeout 10 \
-    --max-time 30 \
-    --header @"$_reg_header_file" \
-    --header "Content-Type: application/json" \
-    --request POST \
-    --write-out '\n%{http_code}' \
-    "${MGMT_API_BASE}/v1/registry-credentials" 2>/dev/null) || {
-    rm -f "$_reg_header_file"
-    return 1
-  }
-
-  rm -f "$_reg_header_file"
-
-  http_code=$(printf '%s' "$raw_response" | tail -1)
-  response=$(printf '%s' "$raw_response" | sed '$d')
-
-  case "$http_code" in
-    2[0-9][0-9])
-      printf '%s' "$response"
-      return 0
-      ;;
-    *) return 1 ;;
-  esac
+  api_call "POST" "${MGMT_API_BASE}/v1/registry-credentials"
 }
 
 # Fetch available image tags from the Docker Registry v2 API.
