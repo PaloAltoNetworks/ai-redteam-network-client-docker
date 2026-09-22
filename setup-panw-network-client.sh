@@ -33,8 +33,7 @@ set -euo pipefail
 # --- Constants ---
 
 SCRIPT_VERSION="0.2.0"
-REGISTRY_DEFAULT="registry.ai-red-teaming.paloaltonetworks.com"
-REGISTRY="$REGISTRY_DEFAULT"
+REGISTRY=""
 KNOWN_REGISTRIES=(
   "us|registry.ai-red-teaming.paloaltonetworks.com|Americas (US)"
   "nl|registry-nl.ai-red-teaming.paloaltonetworks.com|Europe (Netherlands)"
@@ -771,13 +770,16 @@ resolve_registry() {
     REGISTRY="$REGISTRY_HOST"
     return
   fi
-  case "${REGION:-us}" in
-    us) REGISTRY="registry.ai-red-teaming.paloaltonetworks.com" ;;
-    nl) REGISTRY="registry-nl.ai-red-teaming.paloaltonetworks.com" ;;
-    sg) REGISTRY="registry-sg.ai-red-teaming.paloaltonetworks.com" ;;
-    jp) REGISTRY="registry-jp.ai-red-teaming.paloaltonetworks.com" ;;
-    *) REGISTRY="$REGISTRY_DEFAULT" ;;
-  esac
+  local want="${REGION:-us}" entry
+  for entry in "${KNOWN_REGISTRIES[@]}"; do
+    if [ "${entry%%|*}" = "$want" ]; then
+      local rest="${entry#*|}"
+      REGISTRY="${rest%%|*}"
+      return
+    fi
+  done
+  REGISTRY="${KNOWN_REGISTRIES[0]#*|}"
+  REGISTRY="${REGISTRY%%|*}"
 }
 
 select_region() {
@@ -785,39 +787,23 @@ select_region() {
   printf "  ${BOLD}Select your region:${NC}\n"
   echo ""
 
-  local idx=1
-  for entry in "${KNOWN_REGISTRIES[@]}"; do
-    local rest="${entry#*|}"
-    local reg="${rest%%|*}"
-    local location="${rest##*|}"
-    printf "  [${BOLD}%d${NC}] %-50s %s\n" "$idx" "$location" "$reg"
-    idx=$((idx + 1))
+  local n=${#KNOWN_REGISTRIES[@]} i entry rest
+  for ((i = 0; i < n; i++)); do
+    rest="${KNOWN_REGISTRIES[i]#*|}"
+    printf "  [${BOLD}%d${NC}] %-50s %s\n" "$((i + 1))" "${rest##*|}" "${rest%%|*}"
   done
   echo ""
 
   local choice
   while true; do
-    printf "  Select region [1-4]: "
+    printf "  Select region [1-%d]: " "$n"
     read -r choice
-    case "$choice" in
-      1)
-        REGION="us"
-        break
-        ;;
-      2)
-        REGION="nl"
-        break
-        ;;
-      3)
-        REGION="sg"
-        break
-        ;;
-      4)
-        REGION="jp"
-        break
-        ;;
-      *) warn "Invalid selection. Enter 1, 2, 3, or 4." ;;
-    esac
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$n" ]; then
+      entry="${KNOWN_REGISTRIES[$((choice - 1))]}"
+      REGION="${entry%%|*}"
+      break
+    fi
+    warn "Invalid selection. Enter a number between 1 and $n."
   done
 
   resolve_registry
